@@ -29,5 +29,3 @@ frontend/.env.local
 # backend
 backend/.env
 backend/.env.local
-
-DOC's/
