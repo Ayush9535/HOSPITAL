@@ -13,6 +13,9 @@ import org.springframework.test.context.ActiveProfiles;
 import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -237,6 +240,37 @@ class CrossTenantIsolationTest {
         // Pharmacy ERP surface: a sale invoice must be scoped to its owning pharmacy tenant.
         assertRefused(HttpMethod.GET, "/pharmacy/sales/" + aPharmacySaleId, null);
         assertRefused(HttpMethod.GET, "/pharmacy/sales/" + aPharmacySaleId + "/pdf", null);
+    }
+
+    /**
+     * The admin Overview takes no id at all: it reads the whole tenant from the token's
+     * hospitalId, so a lost WHERE clause would not 404 anywhere — it would quietly hand
+     * hospital B hospital A's numbers. Beds are asserted because they are the one block with
+     * no date range, so the assertion cannot drift with the clock: alpha's only bed is
+     * occupied, bravo's only bed is available, and neither may see the other's.
+     */
+    @Test
+    void crossTenant_dashboardOverview_countsOnlyTheCallersOwnHospital() {
+        JsonNode alpha = overviewFor(tokenA);
+        JsonNode bravo = overviewFor(tokenB);
+
+        assertThat(alpha.path("beds").path("occupied").asLong()).as("alpha's own bed").isEqualTo(1);
+        assertThat(alpha.path("beds").path("currentlyAvailable").asLong())
+                .as("alpha must not count bravo's free bed").isEqualTo(0);
+
+        assertThat(bravo.path("beds").path("currentlyAvailable").asLong()).as("bravo's own bed").isEqualTo(1);
+        assertThat(bravo.path("beds").path("occupied").asLong())
+                .as("bravo must not see alpha's occupied bed").isEqualTo(0);
+    }
+
+    private JsonNode overviewFor(String token) {
+        ResponseEntity<String> res = call(HttpMethod.GET, "/hospital/dashboard/overview", token, null);
+        assertThat(res.getStatusCode().value()).as("the owner reads its own overview").isEqualTo(200);
+        try {
+            return new ObjectMapper().readTree(res.getBody());
+        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+            throw new IllegalStateException("overview response was not JSON: " + res.getBody(), e);
+        }
     }
 
     @Test

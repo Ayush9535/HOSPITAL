@@ -69,6 +69,7 @@ class TenantScopingArchTest {
             "DoctorController#downloadPrescriptionByOpd",
             "DoctorService#submitConsultation",
             "FaqController#getFaqs",
+            "HospitalDashboardService#getOverview",
             "HospitalAuthService#getHospitalFees",
             "HospitalAuthService#getProfile",
             "HospitalAuthService#login",

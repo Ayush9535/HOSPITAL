@@ -55,4 +55,14 @@ public interface BedRepository extends JpaRepository<Bed, Long> {
     @Query("SELECT b FROM Bed b WHERE b.bedId = :bedId AND b.hospitalId = :hospitalId")
     java.util.Optional<Bed> findByBedIdAndHospitalIdForUpdate(
             @Param("bedId") Long bedId, @Param("hospitalId") Long hospitalId);
+
+    /**
+     * Every bed of the hospital, counted by status, in one statement.
+     *
+     * <p>Grouping in SQL rather than loading the beds and counting in Java: the occupancy card
+     * needs five numbers, not the ward's furniture. Statuses are free text at the column level, so
+     * the caller must treat anything outside the four known values as unknown rather than assume.
+     */
+    @Query("SELECT b.status, COUNT(b) FROM Bed b WHERE b.hospitalId = :hospitalId GROUP BY b.status")
+    java.util.List<Object[]> countByStatusForHospital(@Param("hospitalId") Long hospitalId);
 }

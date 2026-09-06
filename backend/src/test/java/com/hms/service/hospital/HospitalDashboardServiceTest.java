@@ -1,0 +1,440 @@
+package com.hms.service.hospital;
+
+import com.hms.dto.DashboardOverviewDTO;
+import com.hms.entity.*;
+import com.hms.entity.pharmacy.PharmacySale;
+import com.hms.repository.*;
+import com.hms.repository.pharmacy.PharmacySaleRepository;
+import com.hms.security.SecurityContextHelper;
+import jakarta.persistence.EntityManager;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.autoconfigure.jdbc.AutoConfigureTestDatabase;
+import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest;
+import org.springframework.boot.test.mock.mockito.MockBean;
+import org.springframework.context.annotation.Import;
+import org.springframework.test.context.ActiveProfiles;
+
+import java.math.BigDecimal;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.util.List;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.when;
+
+/**
+ * The Overview's two hard rules, exercised against a real schema.
+ *
+ * <p>One: a capability the tenant does not hold produces no block at all. A zero would be a lie of
+ * a specific kind — it says "you have a pharmacy and it sold nothing", which is a different fact
+ * from "you have no pharmacy", and an admin acts differently on each.
+ *
+ * <p>Two: an OPD belongs to the hospital of its patient and to no one else. The opd table has no
+ * hospital_id, so every aggregate reaches tenancy through the patient, and the doctor — who is
+ * joined only to name a speciality — must never be able to widen or narrow what is counted.
+ */
+@DataJpaTest(showSql = false)
+@AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE)
+@ActiveProfiles("test")
+@Import(HospitalDashboardService.class)
+class HospitalDashboardServiceTest {
+
+    private static final LocalDate DAY = LocalDate.of(2026, 9, 6);
+
+    /** Hospital ids are IDENTITY-generated, so the fixtures hand them back rather than assume. */
+    private long mine;
+    private long theirs;
+
+    @Autowired HospitalDashboardService dashboard;
+    @Autowired EntityManager em;
+    @Autowired HospitalRepository hospitalRepository;
+    @Autowired PatientRepository patientRepository;
+    @Autowired DoctorRepository doctorRepository;
+    @Autowired OpdRepository opdRepository;
+    @Autowired MedicalRecordRepository medicalRecordRepository;
+    @Autowired IpdAdmissionRepository ipdAdmissionRepository;
+    @Autowired BedRepository bedRepository;
+    @Autowired BillingPaymentRepository billingPaymentRepository;
+    @Autowired PharmacySaleRepository pharmacySaleRepository;
+
+    @MockBean BusinessClock businessClock;
+    @MockBean SecurityContextHelper securityHelper;
+
+    @BeforeEach
+    void setUp() {
+        when(businessClock.today()).thenReturn(DAY);
+        when(businessClock.now()).thenReturn(DAY.atTime(14, 30));
+        when(businessClock.zoneId()).thenReturn(java.time.ZoneId.of("Asia/Kolkata"));
+    }
+
+    // ── entitlements ─────────────────────────────────────────────────────────
+
+    @Test
+    void aHospitalWithoutAModuleGetsNoBlockForIt() {
+        mine = myHospital("OPD");
+
+        DashboardOverviewDTO result = dashboard.getOverview(DashboardRange.TODAY);
+
+        assertThat(result.getCore()).isNotNull();
+        assertThat(result.getOpd()).isNotNull();
+        assertThat(result.getIpd()).as("no IPD module").isNull();
+        assertThat(result.getBeds()).as("BEDS is implied by IPD, which is absent").isNull();
+        assertThat(result.getBilling()).isNull();
+        assertThat(result.getPharmacy()).isNull();
+    }
+
+    @Test
+    void anOwnedModuleWithNoActivityStillGetsItsBlockWithZeros() {
+        mine = myHospital("OPD", "IPD", "BILLING", "PHARMACY");
+
+        DashboardOverviewDTO result = dashboard.getOverview(DashboardRange.TODAY);
+
+        assertThat(result.getOpd().count()).isZero();
+        assertThat(result.getOpd().trend()).hasSize(1).allSatisfy(b -> assertThat(b.count()).isZero());
+        assertThat(result.getOpd().visitTypes()).isEmpty();
+        assertThat(result.getOpd().busiestSpecialities()).isEmpty();
+        assertThat(result.getIpd().admissions()).isZero();
+        assertThat(result.getBilling().collection()).isEqualByComparingTo(BigDecimal.ZERO);
+        assertThat(result.getPharmacy().pharmacySales()).isZero();
+    }
+
+    @Test
+    void ipdImpliesBedsEvenThoughBedsIsNeverSoldOrPersisted() {
+        mine = myHospital("IPD");
+
+        DashboardOverviewDTO result = dashboard.getOverview(DashboardRange.TODAY);
+
+        assertThat(result.getIpd()).isNotNull();
+        assertThat(result.getBeds()).as("EntitlementRegistry.resolve expands IPD to BEDS").isNotNull();
+    }
+
+    @Test
+    void theLiveHospitalRowDecidesNotWhateverTheTokenRemembers() {
+        mine = myHospital("OPD");
+        assertThat(dashboard.getOverview(DashboardRange.TODAY).getPharmacy()).isNull();
+
+        Hospital h = hospitalRepository.findById(mine).orElseThrow();
+        h.getModules().add("PHARMACY");
+        hospitalRepository.saveAndFlush(h);
+        em.clear();
+
+        assertThat(dashboard.getOverview(DashboardRange.TODAY).getPharmacy())
+                .as("plan change takes effect on the next request, not the next login")
+                .isNotNull();
+    }
+
+    // ── tenancy ──────────────────────────────────────────────────────────────
+
+    @Test
+    void anotherHospitalsActivityIsNeverCounted() {
+        mine = myHospital("OPD", "IPD", "BILLING", "PHARMACY");
+        theirs = otherHospital("OPD", "IPD", "BILLING", "PHARMACY");
+
+        Patient theirPatient = patient(theirs);
+        opd(theirPatient, null, DAY.atTime(10, 0), Opd.VisitType.NEW);
+        medicalRecord(theirs, DAY.atTime(10, 0), "OPD");
+        ipdAdmission(theirs, DAY.atTime(10, 0));
+        payment(theirs, "500.00", DAY.atTime(10, 0));
+        pharmacySale(theirs, DAY.atTime(10, 0), "POSTED");
+        bed(theirs, BedStatus.OCCUPIED);
+        em.flush();
+        em.clear();
+
+        DashboardOverviewDTO result = dashboard.getOverview(DashboardRange.TODAY);
+
+        assertThat(result.getCore().totalRegisteredPatients()).isZero();
+        assertThat(result.getCore().opdConsultations()).isZero();
+        assertThat(result.getOpd().count()).isZero();
+        assertThat(result.getIpd().admissions()).isZero();
+        assertThat(result.getBilling().collection()).isEqualByComparingTo(BigDecimal.ZERO);
+        assertThat(result.getPharmacy().pharmacySales()).isZero();
+        assertThat(result.getBeds().occupied()).isZero();
+    }
+
+    @Test
+    void anOpdIsOwnedByItsPatientsHospitalNotItsDoctors() {
+        mine = myHospital("OPD");
+        theirs = otherHospital("OPD");
+        Patient myPatient = patient(mine);
+        Doctor foreign = doctor(theirs, "Cardiology");
+        opd(myPatient, foreign, DAY.atTime(11, 0), Opd.VisitType.NEW);
+        em.flush();
+        em.clear();
+
+        DashboardOverviewDTO.OpdBlock opd = dashboard.getOverview(DashboardRange.TODAY).getOpd();
+
+        assertThat(opd.count()).as("the visit still belongs to this hospital").isEqualTo(1);
+        assertThat(opd.busiestSpecialities())
+                .as("but the other tenant's speciality must not leak")
+                .containsExactly(new DashboardOverviewDTO.SpecialityCount("Unassigned", 1));
+    }
+
+    @Test
+    void specialityFallsBackToUnassignedForMissingDoctorAndBlankSpeciality() {
+        mine = myHospital("OPD");
+        Patient p = patient(mine);
+        opd(p, null, DAY.atTime(9, 0), Opd.VisitType.NEW);
+        opd(p, null, DAY.atTime(9, 15), Opd.VisitType.NEW);
+        // Bean Validation forbids persisting a blank specialization, but the column is only
+        // NOT NULL, so legacy/imported rows can still hold one. Reproduce that state directly.
+        Doctor blank = doctor(mine, "Orthopedics");
+        opd(p, blank, DAY.atTime(9, 30), Opd.VisitType.NEW);
+        opd(p, doctor(mine, "Orthopedics"), DAY.atTime(10, 0), Opd.VisitType.NEW);
+        em.flush();
+        em.createNativeQuery("UPDATE doctors SET specialization = '   ' WHERE id = :id")
+                .setParameter("id", blank.getId())
+                .executeUpdate();
+        em.clear();
+
+        DashboardOverviewDTO.OpdBlock opd = dashboard.getOverview(DashboardRange.TODAY).getOpd();
+
+        assertThat(opd.busiestSpecialities()).containsExactly(
+                new DashboardOverviewDTO.SpecialityCount("Unassigned", 3),
+                new DashboardOverviewDTO.SpecialityCount("Orthopedics", 1));
+        assertThat(opd.busiestSpecialities().stream().mapToLong(DashboardOverviewDTO.SpecialityCount::count).sum())
+                .as("buckets always account for every visit").isEqualTo(opd.count());
+    }
+
+    // ── time ─────────────────────────────────────────────────────────────────
+
+    @Test
+    void todayIsTheWholeIstDayAndNothingEitherSideOfIt() {
+        mine = myHospital("OPD");
+        Patient p = patient(mine);
+        opd(p, null, DAY.minusDays(1).atTime(23, 59, 59), Opd.VisitType.NEW);
+        opd(p, null, DAY.atStartOfDay(), Opd.VisitType.NEW);
+        opd(p, null, DAY.atTime(18, 30), Opd.VisitType.NEW);
+        opd(p, null, DAY.atTime(23, 59, 59, 999_999_000), Opd.VisitType.NEW);
+        opd(p, null, DAY.plusDays(1).atStartOfDay(), Opd.VisitType.NEW);
+        em.flush();
+        em.clear();
+
+        assertThat(dashboard.getOverview(DashboardRange.TODAY).getOpd().count()).isEqualTo(3);
+    }
+
+    @Test
+    void trendsCarryEveryDayOfTheRangeIncludingTheSilentOnes() {
+        mine = myHospital("OPD", "IPD");
+        Patient p = patient(mine);
+        opd(p, null, DAY.atTime(10, 0), Opd.VisitType.NEW);
+        opd(p, null, DAY.minusDays(3).atTime(10, 0), Opd.VisitType.FOLLOWUP);
+        ipdAdmission(mine, DAY.minusDays(2).atTime(10, 0));
+        em.flush();
+        em.clear();
+
+        DashboardOverviewDTO week = dashboard.getOverview(DashboardRange.LAST_7_DAYS);
+
+        assertThat(week.getFrom()).isEqualTo(DAY.minusDays(6).atStartOfDay());
+        assertThat(week.getToExclusive()).isEqualTo(DAY.plusDays(1).atStartOfDay());
+        assertThat(week.getOpd().trend()).hasSize(7);
+        assertThat(week.getOpd().trend().get(0).date()).isEqualTo(DAY.minusDays(6));
+        assertThat(week.getOpd().trend().get(6).date()).isEqualTo(DAY);
+        assertThat(week.getOpd().trend().get(6).count()).isEqualTo(1);
+        assertThat(week.getOpd().trend().get(3).count()).isEqualTo(1);
+        assertThat(week.getOpd().trend().get(5).count()).as("a quiet day is a zero, not a gap").isZero();
+        assertThat(week.getIpd().trend()).hasSize(7);
+        assertThat(week.getIpd().admissions()).isEqualTo(1);
+
+        assertThat(dashboard.getOverview(DashboardRange.LAST_30_DAYS).getOpd().trend()).hasSize(30);
+    }
+
+    // ── consultations ────────────────────────────────────────────────────────
+
+    @Test
+    void consultationsCountOpdEncountersAndExcludeInpatientRounds() {
+        mine = myHospital("OPD");
+        medicalRecord(mine, DAY.atTime(10, 0), "OPD");   // walk-in
+        medicalRecord(mine, DAY.atTime(11, 0), "OPD");   // appointment-origin: same record type
+        medicalRecord(mine, DAY.atTime(12, 0), "IPD");   // ward round, not a consultation
+        em.flush();
+        em.clear();
+
+        assertThat(dashboard.getOverview(DashboardRange.TODAY).getCore().opdConsultations())
+                .isEqualTo(2);
+    }
+
+    // ── beds ─────────────────────────────────────────────────────────────────
+
+    @Test
+    void occupancyCountsCleaningAsCapacityAndMaintenanceAsNone() {
+        mine = myHospital("IPD");
+        bed(mine, BedStatus.OCCUPIED);
+        bed(mine, BedStatus.OCCUPIED);
+        bed(mine, BedStatus.AVAILABLE);
+        bed(mine, BedStatus.CLEANING);
+        bed(mine, BedStatus.MAINTENANCE);
+        bed(mine, "decommissioned");   // not a status the domain defines
+        em.flush();
+        em.clear();
+
+        DashboardOverviewDTO.BedsBlock beds = dashboard.getOverview(DashboardRange.TODAY).getBeds();
+
+        assertThat(beds.occupied()).isEqualTo(2);
+        assertThat(beds.usableCapacity()).as("occupied + available + cleaning").isEqualTo(4);
+        assertThat(beds.currentlyAvailable()).as("cleaning is capacity but not free").isEqualTo(1);
+        assertThat(beds.cleaning()).isEqualTo(1);
+        assertThat(beds.maintenance()).isEqualTo(1);
+        assertThat(beds.unknownStatusCount()).isEqualTo(1);
+        assertThat(beds.occupancyRate()).isEqualTo(50.0);
+        assertThat(beds.asOf()).isEqualTo(DAY.atTime(14, 30));
+    }
+
+    @Test
+    void aHospitalWithNoUsableBedsHasNoOccupancyRateRatherThanZeroPercent() {
+        mine = myHospital("IPD");
+        bed(mine, BedStatus.MAINTENANCE);
+        em.flush();
+        em.clear();
+
+        DashboardOverviewDTO.BedsBlock beds = dashboard.getOverview(DashboardRange.TODAY).getBeds();
+
+        assertThat(beds.usableCapacity()).isZero();
+        assertThat(beds.occupancyRate()).as("0% would read as an empty hospital").isNull();
+    }
+
+    // ── billing and pharmacy ────────────────────────────────────────────────
+
+    @Test
+    void collectionSumsPaymentsInTheWindowOnly() {
+        mine = myHospital("BILLING");
+        payment(mine, "1500.50", DAY.atTime(9, 0));
+        payment(mine, "499.50", DAY.atTime(21, 0));
+        payment(mine, "9999.00", DAY.minusDays(1).atTime(23, 59, 59));
+        em.flush();
+        em.clear();
+
+        assertThat(dashboard.getOverview(DashboardRange.TODAY).getBilling().collection())
+                .isEqualByComparingTo(new BigDecimal("2000.00"));
+    }
+
+    @Test
+    void pharmacySalesCountDispensingTransactionsIncludingUnpaidInpatientOnes() {
+        mine = myHospital("PHARMACY");
+        pharmacySale(mine, DAY.atTime(9, 0), "POSTED");
+        PharmacySale unpaidIpd = pharmacySale(mine, DAY.atTime(10, 0), "POSTED");
+        unpaidIpd.setPaymentStatus("PENDING");
+        unpaidIpd.setSaleType("IPD");
+        pharmacySale(mine, DAY.atTime(11, 0), null);      // predates posting_status
+        pharmacySale(mine, DAY.atTime(12, 0), "DRAFT");   // explicitly not posted
+        em.flush();
+        em.clear();
+
+        assertThat(dashboard.getOverview(DashboardRange.TODAY).getPharmacy().pharmacySales())
+                .as("medicine that left the shelf counts, paid or not; a non-posted row does not")
+                .isEqualTo(3);
+    }
+
+    // ── fixtures ─────────────────────────────────────────────────────────────
+
+    /** The hospital the request is made as. */
+    private long myHospital(String... modules) {
+        long id = createHospital(modules);
+        when(securityHelper.getCurrentHospitalId()).thenReturn(id);
+        return id;
+    }
+
+    /** A neighbouring tenant, used to prove its data never reaches the caller. */
+    private long otherHospital(String... modules) {
+        return createHospital(modules);
+    }
+
+    private long createHospital(String... modules) {
+        Hospital h = new Hospital();
+        h.setName("Hospital");
+        h.setType(HospitalType.HOSPITAL);
+        h.setModules(new java.util.ArrayList<>(List.of(modules)));
+        return hospitalRepository.saveAndFlush(h).getId();
+    }
+
+    private Patient patient(long hospitalId) {
+        Patient p = new Patient();
+        p.setHospitalId(hospitalId);
+        p.setName("Patient");
+        p.setPhone("9800000000");
+        p.setGender("MALE");
+        p.setIsActive(true);
+        return patientRepository.saveAndFlush(p);
+    }
+
+    private Doctor doctor(long hospitalId, String specialization) {
+        Doctor d = new Doctor();
+        d.setHospitalId(hospitalId);
+        d.setName("Doctor");
+        d.setEmail("doctor" + System.nanoTime() + "@hospital.test");
+        d.setPhone("9800000001");
+        d.setSpecialization(specialization);
+        d.setIsActive(true);
+        return doctorRepository.saveAndFlush(d);
+    }
+
+    private void opd(Patient patient, Doctor doctor, LocalDateTime at, Opd.VisitType visitType) {
+        Opd o = new Opd();
+        o.setPatient(patient);
+        o.setDoctor(doctor);
+        o.setVisitType(visitType);
+        o.setStatus(Opd.Status.COMPLETED);
+        o.setCreatedAt(at);
+        opdRepository.saveAndFlush(o);
+    }
+
+    private void medicalRecord(long hospitalId, LocalDateTime at, String visitType) {
+        MedicalRecord m = new MedicalRecord();
+        m.setHospitalId(hospitalId);
+        m.setPatientId(1L);
+        m.setDoctorId(1L);
+        m.setVisitType(visitType);
+        m.setPublicId("MR-" + System.nanoTime());
+        MedicalRecord saved = medicalRecordRepository.saveAndFlush(m);
+        // @CreationTimestamp wins over anything set in Java, so place the row explicitly.
+        em.createNativeQuery("UPDATE medical_records SET created_at = :at WHERE id = :id")
+                .setParameter("at", at).setParameter("id", saved.getId()).executeUpdate();
+    }
+
+    private void ipdAdmission(long hospitalId, LocalDateTime at) {
+        IpdAdmission a = new IpdAdmission();
+        a.setHospitalId(hospitalId);
+        a.setIpdNumber("IPD-" + System.nanoTime());
+        a.setPatientId(1L);
+        a.setDoctorId(1L);
+        a.setWardId(1L);
+        a.setBedId(1L);
+        a.setAdmissionType("GENERAL");
+        a.setStatus("ADMITTED");
+        a.setAdmissionConfirmed(true);
+        a.setAdmissionDatetime(at);
+        ipdAdmissionRepository.saveAndFlush(a);
+    }
+
+    private void bed(long hospitalId, String status) {
+        Bed b = new Bed();
+        b.setHospitalId(hospitalId);
+        b.setWardId(1L);
+        b.setBedCode("B" + System.nanoTime());
+        b.setStatus(status);
+        bedRepository.saveAndFlush(b);
+    }
+
+    private void payment(long hospitalId, String amount, LocalDateTime at) {
+        BillingPayment p = new BillingPayment();
+        p.setHospitalId(hospitalId);
+        p.setBillingId(1L);
+        p.setAmount(new BigDecimal(amount));
+        BillingPayment saved = billingPaymentRepository.saveAndFlush(p);
+        em.createNativeQuery("UPDATE billing_payments SET created_at = :at WHERE id = :id")
+                .setParameter("at", at).setParameter("id", saved.getId()).executeUpdate();
+    }
+
+    private PharmacySale pharmacySale(long hospitalId, LocalDateTime at, String postingStatus) {
+        PharmacySale s = new PharmacySale();
+        s.setHospitalId(hospitalId);
+        s.setPostingStatus(postingStatus);
+        s.setPaymentStatus("PAID");
+        s.setBillNumber("PHB-" + System.nanoTime());
+        PharmacySale saved = pharmacySaleRepository.saveAndFlush(s);
+        em.createNativeQuery("UPDATE pharmacy_sales SET created_at = :at WHERE id = :id")
+                .setParameter("at", at).setParameter("id", saved.getId()).executeUpdate();
+        return saved;
+    }
+}

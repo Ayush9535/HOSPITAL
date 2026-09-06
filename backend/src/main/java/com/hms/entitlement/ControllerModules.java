@@ -37,6 +37,9 @@ public final class ControllerModules {
                 "HospitalAuthController", "HospitalAuditController", "HospitalTicketController",
                 "FaqController", "ConsultationNotePresetController", "PrescriptionPresetController",
                 "PharmacistController",
+                // The admin's own front page. Its optional analytics are gated block by block
+                // inside the response, so the endpoint itself belongs to every hospital.
+                "HospitalDashboardController",
                 // Documents a patient brings belong to the patient, not to any module.
                 "PatientDocumentController");
 
