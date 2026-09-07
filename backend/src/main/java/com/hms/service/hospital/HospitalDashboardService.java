@@ -135,8 +135,9 @@ public class HospitalDashboardService {
         List<DashboardOverviewDTO.SpecialityCount> specialities = new ArrayList<>();
         for (Object[] row : opdRepository.countBySpecialityInRange(
                 hospitalId, from, toExclusive, PageRequest.of(0, TOP_SPECIALITIES))) {
-            // The query returns NULL for every visit whose speciality cannot be attributed to a
-            // same-tenant doctor; that bucket is named here rather than in SQL.
+            // NULL is the canonical unassigned bucket: unattributable visits and a doctor whose
+            // speciality is literally "Unassigned" are already grouped together in SQL, so naming
+            // it here cannot merge two separately ranked groups after the fact.
             String speciality = row[0] == null ? UNASSIGNED : String.valueOf(row[0]);
             specialities.add(new DashboardOverviewDTO.SpecialityCount(speciality, asLong(row[1])));
         }
@@ -166,8 +167,9 @@ public class HospitalDashboardService {
             else if (BedStatus.AVAILABLE.equalsIgnoreCase(status)) available += count;
             else if (BedStatus.CLEANING.equalsIgnoreCase(status)) cleaning += count;
             else if (BedStatus.MAINTENANCE.equalsIgnoreCase(status)) maintenance += count;
-            // A status the domain does not define is reported, not folded into a bucket it might
-            // not belong in, and stays out of the ratio so the percentage remains defensible.
+            // A status the domain does not define is reported rather than folded into a bucket it
+            // might not belong in. It is still one of the hospital's beds, so it stays in usable
+            // capacity below; it simply cannot be claimed as occupied, available or cleaning.
             else unknown += count;
         }
 

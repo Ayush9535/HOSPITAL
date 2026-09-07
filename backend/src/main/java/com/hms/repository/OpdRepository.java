@@ -170,29 +170,39 @@ public interface OpdRepository extends JpaRepository<Opd, Long> {
 	 * as Unassigned. A doctor row from another hospital therefore contributes a bucket name that
 	 * came from this tenant's own vocabulary, never that hospital's speciality metadata.
 	 *
-	 * <p>The unassigned bucket comes back as NULL rather than a bound label: a parameter inside
-	 * the CASE renders differently in SELECT and GROUP BY, which strict databases reject. The
-	 * caller names it. Unassigned also absorbs a missing doctor and a blank speciality, so the sum
-	 * of the buckets always equals the OPD total.
+	 * <p>The unassigned bucket is SQL NULL rather than a bound label. A parameter inside the CASE
+	 * renders differently in SELECT and GROUP BY, which strict databases reject; NULL also cannot
+	 * collide with a real speciality, which a string can. A doctor whose speciality is literally
+	 * "Unassigned" is therefore folded into the same NULL bucket — otherwise two groups would rank
+	 * and truncate separately and then display the same word twice. The caller names the bucket.
+	 *
+	 * <p>The one expression below is repeated verbatim in SELECT, GROUP BY and ORDER BY. It has to
+	 * be: canonicalisation that happens after the LIMIT would rank the wrong five. Whitespace is
+	 * trimmed for the same reason — " Cardiology" and "Cardiology" are one speciality.
 	 *
 	 * <p>Ordering is count first and then the bucket itself, because count alone is not a total
 	 * order: two specialities tied on the fifth row would swap places between requests and the
 	 * chart would reshuffle while nothing changed. The tie-break repeats the CASE rather than
-	 * naming the doctor's column, so it orders by the same value the caller sees and cannot order
-	 * by a foreign tenant's speciality.
+	 * naming the doctor's column, so it cannot order by a foreign tenant's speciality.
+	 *
+	 * <p>These are the busiest few, not the whole distribution: the buckets sum to the OPD total
+	 * only when a hospital has five specialities or fewer.
 	 */
 	@Query("SELECT CASE WHEN d.id IS NOT NULL AND d.hospitalId = p.hospitalId "
 			+ "AND d.specialization IS NOT NULL AND TRIM(d.specialization) <> '' "
-			+ "THEN d.specialization ELSE NULL END, COUNT(o) "
+			+ "AND LOWER(TRIM(d.specialization)) <> 'unassigned' "
+			+ "THEN TRIM(d.specialization) ELSE NULL END, COUNT(o) "
 			+ "FROM Opd o JOIN o.patient p LEFT JOIN o.doctor d "
 			+ "WHERE p.hospitalId = :hospitalId "
 			+ "AND o.createdAt >= :from AND o.createdAt < :toExclusive "
 			+ "GROUP BY CASE WHEN d.id IS NOT NULL AND d.hospitalId = p.hospitalId "
 			+ "AND d.specialization IS NOT NULL AND TRIM(d.specialization) <> '' "
-			+ "THEN d.specialization ELSE NULL END "
+			+ "AND LOWER(TRIM(d.specialization)) <> 'unassigned' "
+			+ "THEN TRIM(d.specialization) ELSE NULL END "
 			+ "ORDER BY COUNT(o) DESC, CASE WHEN d.id IS NOT NULL AND d.hospitalId = p.hospitalId "
 			+ "AND d.specialization IS NOT NULL AND TRIM(d.specialization) <> '' "
-			+ "THEN d.specialization ELSE NULL END ASC")
+			+ "AND LOWER(TRIM(d.specialization)) <> 'unassigned' "
+			+ "THEN TRIM(d.specialization) ELSE NULL END ASC")
 	java.util.List<Object[]> countBySpecialityInRange(@Param("hospitalId") Long hospitalId,
 			@Param("from") java.time.LocalDateTime from,
 			@Param("toExclusive") java.time.LocalDateTime toExclusive,

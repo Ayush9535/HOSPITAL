@@ -270,16 +270,33 @@ class CrossTenantIsolationTest {
      */
     @Test
     void aClinicTenantCannotOpenTheHospitalOverview() {
-        long clinicId = seedHospital("clinic", false);
-        User clinicAdmin = seedUser(clinicId, "clinic");
-        String clinicToken = jwtUtil.generateToken(clinicAdmin.getId(), clinicAdmin.getEmail(),
-                clinicAdmin.getRole(), clinicId, MODULES, null, "CLINIC", null,
-                clinicAdmin.getTokenVersion());
+        assertThat(overviewStatusFor(HospitalType.CLINIC))
+                .as("a clinic has no wards or inpatient admissions to report on").isEqualTo(403);
+    }
 
-        int status = call(HttpMethod.GET, "/hospital/dashboard/overview", clinicToken, null)
+    @Test
+    void aPharmacyTenantCannotOpenTheHospitalOverview() {
+        assertThat(overviewStatusFor(HospitalType.PHARMACY))
+                .as("nor does a pharmacy").isEqualTo(403);
+    }
+
+    /**
+     * A real row of that facility type and a token claiming it, because the two aspects read
+     * different things: FacilityAccessAspect looks the hospital up, TenantTypeAspect trusts the
+     * claim. Only a fixture that is consistently one facility type exercises both the way a real
+     * login does.
+     */
+    private int overviewStatusFor(HospitalType type) {
+        String slug = type.name().toLowerCase(java.util.Locale.ROOT);
+        long id = seedHospital(slug, false);
+        Hospital h = hospitalRepository.findById(id).orElseThrow();
+        h.setType(type);
+        hospitalRepository.save(h);
+        User admin = seedUser(id, slug);
+        String token = jwtUtil.generateToken(admin.getId(), admin.getEmail(), admin.getRole(),
+                id, MODULES, null, type.name(), null, admin.getTokenVersion());
+        return call(HttpMethod.GET, "/hospital/dashboard/overview", token, null)
                 .getStatusCode().value();
-
-        assertThat(status).as("a clinic has no wards to report on").isEqualTo(403);
     }
 
     private JsonNode overviewFor(String token) {

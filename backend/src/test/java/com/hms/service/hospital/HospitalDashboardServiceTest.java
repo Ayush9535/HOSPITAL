@@ -45,6 +45,7 @@ import static org.mockito.Mockito.when;
 class HospitalDashboardServiceTest {
 
     private static final LocalDate DAY = LocalDate.of(2026, 9, 6);
+    private static final String UNASSIGNED = HospitalDashboardService.UNASSIGNED;
 
     /** Hospital ids are IDENTITY-generated, so the fixtures hand them back rather than assume. */
     private long mine;
@@ -215,9 +216,7 @@ class HospitalDashboardServiceTest {
         opd(p, blank, DAY.atTime(9, 30), Opd.VisitType.NEW);
         opd(p, doctor(mine, "Orthopedics"), DAY.atTime(10, 0), Opd.VisitType.NEW);
         em.flush();
-        em.createNativeQuery("UPDATE doctors SET specialization = '   ' WHERE id = :id")
-                .setParameter("id", blank.getId())
-                .executeUpdate();
+        blankSpeciality(blank);
         em.clear();
 
         DashboardOverviewDTO.OpdBlock opd = dashboard.getOverview(DashboardRange.TODAY).getOpd();
@@ -227,6 +226,82 @@ class HospitalDashboardServiceTest {
                 new DashboardOverviewDTO.SpecialityCount("Orthopedics", 1));
         assertThat(opd.busiestSpecialities().stream().mapToLong(DashboardOverviewDTO.SpecialityCount::count).sum())
                 .as("buckets always account for every visit").isEqualTo(opd.count());
+    }
+
+    /**
+     * A doctor really can have "Unassigned" typed into the speciality field, and it must not
+     * become a second bucket wearing the same name. Merging in SQL is what makes that impossible:
+     * merging in Java after the LIMIT would rank two half-sized groups and could drop one of them
+     * off the end of a five-row list that should have had one full-sized entry.
+     */
+    @Test
+    void aLiteralUnassignedSpecialityJoinsTheFallbackBucketRatherThanShadowingIt() {
+        mine = myHospital("OPD");
+        theirs = otherHospital("OPD");
+        Patient p = patient(mine);
+        Doctor literal = doctor(mine, "Unassigned");
+        opd(p, literal, DAY.atTime(9, 0), Opd.VisitType.NEW);
+        opd(p, doctor(mine, "unassigned"), DAY.atTime(9, 5), Opd.VisitType.NEW);
+        opd(p, null, DAY.atTime(9, 10), Opd.VisitType.NEW);                      // no doctor
+        opd(p, doctor(theirs, "Cardiology"), DAY.atTime(9, 15), Opd.VisitType.NEW); // other tenant
+        Doctor blank = doctor(mine, "Orthopedics");
+        opd(p, blank, DAY.atTime(9, 20), Opd.VisitType.NEW);                     // blanked below
+        opd(p, doctor(mine, "Orthopedics"), DAY.atTime(9, 25), Opd.VisitType.NEW);
+        em.flush();
+        blankSpeciality(blank);
+        em.clear();
+
+        List<DashboardOverviewDTO.SpecialityCount> buckets =
+                dashboard.getOverview(DashboardRange.TODAY).getOpd().busiestSpecialities();
+
+        assertThat(buckets).filteredOn(b -> b.speciality().equals(UNASSIGNED))
+                .as("exactly one bucket may carry this label").hasSize(1);
+        assertThat(buckets).containsExactly(
+                new DashboardOverviewDTO.SpecialityCount(UNASSIGNED, 5),
+                new DashboardOverviewDTO.SpecialityCount("Orthopedics", 1));
+    }
+
+    /**
+     * Six distinct groups, one of which only wins its place because its fragments were merged
+     * before the ranking. Canonicalise after the LIMIT instead and Unassigned arrives as five
+     * groups of one, none of which outranks anything, and the real fifth speciality is displaced.
+     */
+    @Test
+    void bucketsAreCanonicalisedBeforeTheTopFiveIsChosenNotAfter() {
+        mine = myHospital("OPD");
+        theirs = otherHospital("OPD");
+        Patient p = patient(mine);
+        int minute = 0;
+        for (String s : List.of("Cardiology", "Cardiology", "Cardiology", "Cardiology",
+                "Orthopedics", "Orthopedics", "Orthopedics",
+                "Neurology", "Neurology", "Dermatology")) {
+            opd(p, doctor(mine, s), DAY.atTime(9, minute++), Opd.VisitType.NEW);
+        }
+        // Five one-visit fragments that are all the same bucket once normalised.
+        opd(p, doctor(mine, "Unassigned"), DAY.atTime(10, 0), Opd.VisitType.NEW);
+        opd(p, doctor(mine, "UNASSIGNED"), DAY.atTime(10, 1), Opd.VisitType.NEW);
+        opd(p, null, DAY.atTime(10, 2), Opd.VisitType.NEW);
+        opd(p, doctor(theirs, "Radiology"), DAY.atTime(10, 3), Opd.VisitType.NEW);
+        Doctor blank = doctor(mine, "Pathology");
+        opd(p, blank, DAY.atTime(10, 4), Opd.VisitType.NEW);
+        // One more real speciality that must be pushed out of the top five by the merged bucket.
+        opd(p, doctor(mine, "Psychiatry"), DAY.atTime(11, 0), Opd.VisitType.NEW);
+        em.flush();
+        blankSpeciality(blank);
+        em.clear();
+
+        List<DashboardOverviewDTO.SpecialityCount> top =
+                dashboard.getOverview(DashboardRange.TODAY).getOpd().busiestSpecialities();
+
+        assertThat(top).containsExactly(
+                new DashboardOverviewDTO.SpecialityCount(UNASSIGNED, 5),
+                new DashboardOverviewDTO.SpecialityCount("Cardiology", 4),
+                new DashboardOverviewDTO.SpecialityCount("Orthopedics", 3),
+                new DashboardOverviewDTO.SpecialityCount("Neurology", 2),
+                new DashboardOverviewDTO.SpecialityCount("Dermatology", 1));
+        assertThat(top).extracting(DashboardOverviewDTO.SpecialityCount::speciality)
+                .as("Psychiatry and Pathology lose the tie for the last place, deterministically")
+                .doesNotContain("Psychiatry", "Pathology");
     }
 
     /**
@@ -402,10 +477,14 @@ class HospitalDashboardServiceTest {
         PharmacySale unpaidIpd = pharmacySale(mine, DAY.atTime(10, 0), "POSTED");
         unpaidIpd.setPaymentStatus("PENDING");
         unpaidIpd.setSaleType("IPD");
-        pharmacySale(mine, DAY.atTime(11, 0), null);      // predates posting_status
+        PharmacySale legacy = pharmacySale(mine, DAY.atTime(11, 0), null); // predates the column
         pharmacySale(mine, DAY.atTime(12, 0), "DRAFT");   // explicitly not posted
         em.flush();
         em.clear();
+
+        assertThat(rawPostingStatus(legacy.getId()))
+                .as("the legacy row must really hold NULL, or this test proves nothing")
+                .isNull();
 
         assertThat(dashboard.getOverview(DashboardRange.TODAY).getPharmacy().pharmacySales())
                 .as("medicine that left the shelf counts, paid or not; a non-posted row does not")
@@ -512,15 +591,40 @@ class HospitalDashboardServiceTest {
                 .setParameter("at", at).setParameter("id", saved.getId()).executeUpdate();
     }
 
+    /**
+     * @param postingStatus null means a row that predates the column. PharmacySale's @PrePersist
+     *                      rewrites a null to POSTED, so persisting one and hoping is not enough —
+     *                      the null has to be written past the entity, the way ddl-auto adding the
+     *                      column to a table that already had rows wrote it.
+     */
     private PharmacySale pharmacySale(long hospitalId, LocalDateTime at, String postingStatus) {
         PharmacySale s = new PharmacySale();
         s.setHospitalId(hospitalId);
-        s.setPostingStatus(postingStatus);
+        s.setPostingStatus(postingStatus == null ? "POSTED" : postingStatus);
         s.setPaymentStatus("PAID");
         s.setBillNumber("PHB-" + System.nanoTime());
         PharmacySale saved = pharmacySaleRepository.saveAndFlush(s);
         em.createNativeQuery("UPDATE pharmacy_sales SET created_at = :at WHERE id = :id")
                 .setParameter("at", at).setParameter("id", saved.getId()).executeUpdate();
+        if (postingStatus == null) {
+            em.createNativeQuery("UPDATE pharmacy_sales SET posting_status = NULL WHERE id = :id")
+                    .setParameter("id", saved.getId()).executeUpdate();
+        }
         return saved;
+    }
+
+    /**
+     * Bean Validation forbids persisting a blank specialization, but the column is only NOT NULL,
+     * so legacy and imported rows can still hold one. Write it the way they got there.
+     */
+    private void blankSpeciality(Doctor doctor) {
+        em.createNativeQuery("UPDATE doctors SET specialization = '   ' WHERE id = :id")
+                .setParameter("id", doctor.getId()).executeUpdate();
+    }
+
+    /** Reads the column straight out of the database, past the entity and its defaults. */
+    private Object rawPostingStatus(long saleId) {
+        return em.createNativeQuery("SELECT posting_status FROM pharmacy_sales WHERE id = :id")
+                .setParameter("id", saleId).getSingleResult();
     }
 }
