@@ -58,4 +58,20 @@ public interface IpdAdmissionRepository extends JpaRepository<IpdAdmission, Long
      */
     java.util.List<IpdAdmission> findByHospitalIdAndStatusInAndWardIdIn(
             Long hospitalId, java.util.Collection<String> statuses, java.util.Collection<Long> wardIds);
+
+    /**
+     * Daily admissions for the trend. The block's total is the sum, so one statement covers both.
+     *
+     * <p>Native for the same reason as the OPD trend: DATE() is not portable JPQL. Only days with
+     * admissions come back; the caller zero-fills the rest.
+     */
+    @org.springframework.data.jpa.repository.Query(
+            value = "SELECT DATE(admission_datetime) AS d, COUNT(*) AS c FROM ipd_admission "
+            + "WHERE hospital_id = :hospitalId "
+            + "AND admission_datetime >= :from AND admission_datetime < :toExclusive "
+            + "GROUP BY DATE(admission_datetime)", nativeQuery = true)
+    java.util.List<Object[]> countAdmissionsPerDayInRange(
+            @org.springframework.data.repository.query.Param("hospitalId") Long hospitalId,
+            @org.springframework.data.repository.query.Param("from") java.time.LocalDateTime from,
+            @org.springframework.data.repository.query.Param("toExclusive") java.time.LocalDateTime toExclusive);
 }

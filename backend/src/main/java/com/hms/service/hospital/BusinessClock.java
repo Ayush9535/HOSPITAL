@@ -43,4 +43,17 @@ public class BusinessClock {
     public LocalDate today() {
         return LocalDate.now(clock);
     }
+
+    /**
+     * Business wall-clock instant. Used where a reading is a snapshot rather than a day — bed
+     * occupancy is true at a moment, not across a range, so it timestamps itself.
+     */
+    public java.time.LocalDateTime now() {
+        return java.time.LocalDateTime.now(clock);
+    }
+
+    /** The business zone, so a response can state which day boundary produced its numbers. */
+    public ZoneId zoneId() {
+        return clock.getZone();
+    }
 }

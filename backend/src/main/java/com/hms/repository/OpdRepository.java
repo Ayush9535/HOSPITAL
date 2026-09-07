@@ -121,4 +121,90 @@ public interface OpdRepository extends JpaRepository<Opd, Long> {
 			+ "ORDER BY o.createdAt ASC")
 	java.util.List<Opd> findByPatientAndHospitalIdOrderByCreatedAtAsc(
 			@Param("patientId") Long patientId, @Param("hospitalId") Long hospitalId);
+
+	/**
+	 * OPD visits in the window, grouped by visit type. The block's total is the sum of these, so
+	 * one statement answers both "how many" and "what kind".
+	 *
+	 * <p>Tenancy is the patient's. The opd table has no hospital_id at all — an OPD belongs to a
+	 * hospital only because its patient does — so every dashboard aggregate joins through
+	 * o.patient. An inner join makes that a filter, not a decoration: a visit whose patient is
+	 * invisible to this tenant cannot appear in its counts.
+	 *
+	 * <p>visit_type is nullable, so callers must keep the null group rather than drop it, or the
+	 * breakdown stops adding up to the total it sits next to.
+	 */
+	@Query("SELECT o.visitType, COUNT(o) FROM Opd o JOIN o.patient p "
+			+ "WHERE p.hospitalId = :hospitalId "
+			+ "AND o.createdAt >= :from AND o.createdAt < :toExclusive "
+			+ "GROUP BY o.visitType")
+	java.util.List<Object[]> countByVisitTypeInRange(@Param("hospitalId") Long hospitalId,
+			@Param("from") java.time.LocalDateTime from,
+			@Param("toExclusive") java.time.LocalDateTime toExclusive);
+
+	/**
+	 * Daily OPD counts for the trend, aggregated in SQL.
+	 *
+	 * <p>Native because DATE() is not portable JPQL; MySQL and H2-in-MySQL-mode both provide it.
+	 * Returns only the days that actually have visits — the caller zero-fills the rest, so a quiet
+	 * Sunday is a zero on the chart rather than a hole in it.
+	 */
+	@Query(value = "SELECT DATE(o.created_at) AS d, COUNT(*) AS c FROM opd o "
+			+ "JOIN patients p ON p.id = o.patient_id "
+			+ "WHERE p.hospital_id = :hospitalId "
+			+ "AND o.created_at >= :from AND o.created_at < :toExclusive "
+			+ "GROUP BY DATE(o.created_at)", nativeQuery = true)
+	java.util.List<Object[]> countPerDayInRange(@Param("hospitalId") Long hospitalId,
+			@Param("from") java.time.LocalDateTime from,
+			@Param("toExclusive") java.time.LocalDateTime toExclusive);
+
+	/**
+	 * Busiest specialities, and the one query in this dashboard with a security shape worth
+	 * reading twice.
+	 *
+	 * <p>The doctor is joined for one attribute — the speciality label — and must never influence
+	 * which visits are counted. So the tenant predicate stays on the patient, the doctor join is a
+	 * LEFT JOIN, and the same-hospital check lives inside the CASE rather than in the WHERE. Put
+	 * that check in the WHERE and an OPD attended by another tenant's doctor would silently vanish
+	 * from this hospital's totals; put it in the CASE and the visit still counts, it simply counts
+	 * as Unassigned. A doctor row from another hospital therefore contributes a bucket name that
+	 * came from this tenant's own vocabulary, never that hospital's speciality metadata.
+	 *
+	 * <p>The unassigned bucket is SQL NULL rather than a bound label. A parameter inside the CASE
+	 * renders differently in SELECT and GROUP BY, which strict databases reject; NULL also cannot
+	 * collide with a real speciality, which a string can. A doctor whose speciality is literally
+	 * "Unassigned" is therefore folded into the same NULL bucket — otherwise two groups would rank
+	 * and truncate separately and then display the same word twice. The caller names the bucket.
+	 *
+	 * <p>The one expression below is repeated verbatim in SELECT, GROUP BY and ORDER BY. It has to
+	 * be: canonicalisation that happens after the LIMIT would rank the wrong five. Whitespace is
+	 * trimmed for the same reason — " Cardiology" and "Cardiology" are one speciality.
+	 *
+	 * <p>Ordering is count first and then the bucket itself, because count alone is not a total
+	 * order: two specialities tied on the fifth row would swap places between requests and the
+	 * chart would reshuffle while nothing changed. The tie-break repeats the CASE rather than
+	 * naming the doctor's column, so it cannot order by a foreign tenant's speciality.
+	 *
+	 * <p>These are the busiest few, not the whole distribution: the buckets sum to the OPD total
+	 * only when a hospital has five specialities or fewer.
+	 */
+	@Query("SELECT CASE WHEN d.id IS NOT NULL AND d.hospitalId = p.hospitalId "
+			+ "AND d.specialization IS NOT NULL AND TRIM(d.specialization) <> '' "
+			+ "AND LOWER(TRIM(d.specialization)) <> 'unassigned' "
+			+ "THEN TRIM(d.specialization) ELSE NULL END, COUNT(o) "
+			+ "FROM Opd o JOIN o.patient p LEFT JOIN o.doctor d "
+			+ "WHERE p.hospitalId = :hospitalId "
+			+ "AND o.createdAt >= :from AND o.createdAt < :toExclusive "
+			+ "GROUP BY CASE WHEN d.id IS NOT NULL AND d.hospitalId = p.hospitalId "
+			+ "AND d.specialization IS NOT NULL AND TRIM(d.specialization) <> '' "
+			+ "AND LOWER(TRIM(d.specialization)) <> 'unassigned' "
+			+ "THEN TRIM(d.specialization) ELSE NULL END "
+			+ "ORDER BY COUNT(o) DESC, CASE WHEN d.id IS NOT NULL AND d.hospitalId = p.hospitalId "
+			+ "AND d.specialization IS NOT NULL AND TRIM(d.specialization) <> '' "
+			+ "AND LOWER(TRIM(d.specialization)) <> 'unassigned' "
+			+ "THEN TRIM(d.specialization) ELSE NULL END ASC")
+	java.util.List<Object[]> countBySpecialityInRange(@Param("hospitalId") Long hospitalId,
+			@Param("from") java.time.LocalDateTime from,
+			@Param("toExclusive") java.time.LocalDateTime toExclusive,
+			Pageable pageable);
 }

@@ -138,4 +138,19 @@ public interface MedicalRecordRepository extends JpaRepository<MedicalRecord, Lo
             @org.springframework.data.repository.query.Param("doctorId") Long doctorId,
             @org.springframework.data.repository.query.Param("from") java.time.LocalDate from,
             @org.springframework.data.repository.query.Param("to") java.time.LocalDate to);
+
+    /**
+     * OPD consultations in a business-day window: encounters, not distinct patients.
+     *
+     * <p>{@code visit_type = 'OPD'} is what separates a consultation from an inpatient ward round.
+     * IpdAdmissionService writes its own records with visit_type 'IPD' and its comment is explicit
+     * that those carry no consultation fee — a doctor visiting their own admitted patient is not a
+     * new consultation. The column is NOT NULL, so no legacy row can slip through untyped.
+     */
+    @Query("SELECT COUNT(m) FROM MedicalRecord m WHERE m.hospitalId = :hospitalId "
+            + "AND m.visitType = 'OPD' AND m.createdAt >= :from AND m.createdAt < :toExclusive")
+    long countOpdConsultationsInRange(
+            @org.springframework.data.repository.query.Param("hospitalId") Long hospitalId,
+            @org.springframework.data.repository.query.Param("from") java.time.LocalDateTime from,
+            @org.springframework.data.repository.query.Param("toExclusive") java.time.LocalDateTime toExclusive);
 }

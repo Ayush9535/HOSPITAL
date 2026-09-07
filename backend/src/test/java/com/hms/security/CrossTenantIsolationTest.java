@@ -13,6 +13,9 @@ import org.springframework.test.context.ActiveProfiles;
 import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -237,6 +240,73 @@ class CrossTenantIsolationTest {
         // Pharmacy ERP surface: a sale invoice must be scoped to its owning pharmacy tenant.
         assertRefused(HttpMethod.GET, "/pharmacy/sales/" + aPharmacySaleId, null);
         assertRefused(HttpMethod.GET, "/pharmacy/sales/" + aPharmacySaleId + "/pdf", null);
+    }
+
+    /**
+     * The admin Overview takes no id at all: it reads the whole tenant from the token's
+     * hospitalId, so a lost WHERE clause would not 404 anywhere — it would quietly hand
+     * hospital B hospital A's numbers. Beds are asserted because they are the one block with
+     * no date range, so the assertion cannot drift with the clock: alpha's only bed is
+     * occupied, bravo's only bed is available, and neither may see the other's.
+     */
+    @Test
+    void crossTenant_dashboardOverview_countsOnlyTheCallersOwnHospital() {
+        JsonNode alpha = overviewFor(tokenA);
+        JsonNode bravo = overviewFor(tokenB);
+
+        assertThat(alpha.path("beds").path("occupied").asLong()).as("alpha's own bed").isEqualTo(1);
+        assertThat(alpha.path("beds").path("currentlyAvailable").asLong())
+                .as("alpha must not count bravo's free bed").isEqualTo(0);
+
+        assertThat(bravo.path("beds").path("currentlyAvailable").asLong()).as("bravo's own bed").isEqualTo(1);
+        assertThat(bravo.path("beds").path("occupied").asLong())
+                .as("bravo must not see alpha's occupied bed").isEqualTo(0);
+    }
+
+    /**
+     * The Overview describes wards, beds and inpatient admissions. Being a CORE controller is what
+     * lets any facility type reach it — FacilityAccessAspect waves CORE through — so the hospital
+     * restriction has to be stated with @TenantType or it is not stated at all.
+     */
+    @Test
+    void aClinicTenantCannotOpenTheHospitalOverview() {
+        assertThat(overviewStatusFor(HospitalType.CLINIC))
+                .as("a clinic has no wards or inpatient admissions to report on").isEqualTo(403);
+    }
+
+    @Test
+    void aPharmacyTenantCannotOpenTheHospitalOverview() {
+        assertThat(overviewStatusFor(HospitalType.PHARMACY))
+                .as("nor does a pharmacy").isEqualTo(403);
+    }
+
+    /**
+     * A real row of that facility type and a token claiming it, because the two aspects read
+     * different things: FacilityAccessAspect looks the hospital up, TenantTypeAspect trusts the
+     * claim. Only a fixture that is consistently one facility type exercises both the way a real
+     * login does.
+     */
+    private int overviewStatusFor(HospitalType type) {
+        String slug = type.name().toLowerCase(java.util.Locale.ROOT);
+        long id = seedHospital(slug, false);
+        Hospital h = hospitalRepository.findById(id).orElseThrow();
+        h.setType(type);
+        hospitalRepository.save(h);
+        User admin = seedUser(id, slug);
+        String token = jwtUtil.generateToken(admin.getId(), admin.getEmail(), admin.getRole(),
+                id, MODULES, null, type.name(), null, admin.getTokenVersion());
+        return call(HttpMethod.GET, "/hospital/dashboard/overview", token, null)
+                .getStatusCode().value();
+    }
+
+    private JsonNode overviewFor(String token) {
+        ResponseEntity<String> res = call(HttpMethod.GET, "/hospital/dashboard/overview", token, null);
+        assertThat(res.getStatusCode().value()).as("the owner reads its own overview").isEqualTo(200);
+        try {
+            return new ObjectMapper().readTree(res.getBody());
+        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+            throw new IllegalStateException("overview response was not JSON: " + res.getBody(), e);
+        }
     }
 
     @Test
