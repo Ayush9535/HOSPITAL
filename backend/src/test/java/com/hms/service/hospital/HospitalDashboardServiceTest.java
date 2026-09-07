@@ -9,6 +9,8 @@ import com.hms.security.SecurityContextHelper;
 import jakarta.persistence.EntityManager;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.jdbc.AutoConfigureTestDatabase;
 import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest;
@@ -468,6 +470,33 @@ class HospitalDashboardServiceTest {
 
         assertThat(dashboard.getOverview(DashboardRange.TODAY).getBilling().collection())
                 .isEqualByComparingTo(new BigDecimal("2000.00"));
+    }
+
+    /**
+     * One row per invocation, so each answer is 0 or 1 and means one thing. Asserting a total
+     * across several rows cannot police the boundary: rows spanning yesterday evening to this
+     * afternoon total the same as rows spanning midnight to midnight, so a window shifted by five
+     * and a half hours in either direction would still add up. PharmacySaleTimestampIT repeats
+     * this against the TIMESTAMP column production really has; here it runs against the schema
+     * Hibernate generates, which is where the window arithmetic itself is proven.
+     */
+    @ParameterizedTest(name = "{0} -> {1}")
+    @CsvSource({
+            "2026-09-05T23:59:59, 0",  // last second of yesterday
+            "2026-09-06T00:00:00, 1",  // first second of today, inclusive bound
+            "2026-09-06T14:30:00, 1",  // the middle of the business day
+            "2026-09-06T23:59:59, 1",  // last second of today
+            "2026-09-07T00:00:00, 0",  // first second of tomorrow, exclusive bound
+    })
+    void eachPharmacyBoundaryRowIsCountedOrNotOnItsOwn(String createdAt, long expected) {
+        mine = myHospital("PHARMACY");
+        pharmacySale(mine, LocalDateTime.parse(createdAt), "POSTED");
+        em.flush();
+        em.clear();
+
+        assertThat(dashboard.getOverview(DashboardRange.TODAY).getPharmacy().pharmacySales())
+                .as("%s against [2026-09-06T00:00, 2026-09-07T00:00)", createdAt)
+                .isEqualTo(expected);
     }
 
     @Test
