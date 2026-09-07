@@ -40,8 +40,15 @@ public class DashboardOverviewDTO {
     private BillingBlock billing;
     private PharmacyBlock pharmacy;
 
-    /** Always present: these need no module beyond being a hospital. */
-    public record Core(long totalRegisteredPatients, long opdConsultations) {}
+    /**
+     * Always present: the one number that needs no module beyond being a hospital.
+     *
+     * <p>Consultations used to live here and did not belong: OPD is a sellable capability, so an
+     * OPD-shaped metric on the core block ran its query and showed its label to a hospital that
+     * had not bought OPD. It now sits inside {@link OpdBlock}, behind the same gate as everything
+     * else OPD.
+     */
+    public record Core(long totalRegisteredPatients) {}
 
     /** One day of a trend. Every day in the range is present, including the silent ones. */
     public record Bucket(LocalDate date, long count) {}
@@ -50,7 +57,14 @@ public class DashboardOverviewDTO {
 
     public record SpecialityCount(String speciality, long count) {}
 
-    public record OpdBlock(long count, List<Bucket> trend, List<VisitTypeCount> visitTypes,
+    /**
+     * {@code consultations} counts completed doctor encounters (medical records); {@code count}
+     * counts OPD visits. They differ legitimately — a visit registered at the desk that the doctor
+     * has not seen yet is a visit without a consultation — so both are reported rather than one
+     * standing in for the other.
+     */
+    public record OpdBlock(long consultations, long count, List<Bucket> trend,
+                           List<VisitTypeCount> visitTypes,
                            List<SpecialityCount> busiestSpecialities) {}
 
     public record IpdBlock(long admissions, List<Bucket> trend) {}
@@ -59,11 +73,14 @@ public class DashboardOverviewDTO {
      * A snapshot, not a range: beds are counted as they stand right now, which is why this block
      * carries its own {@code asOf} instead of borrowing the report's window.
      *
-     * <p>{@code usableCapacity} excludes maintenance beds, because a bed under maintenance is not
-     * capacity anyone can sell. Cleaning beds stay in the denominator — they are capacity, merely
-     * not free this minute — which is also why {@code currentlyAvailable} is narrower than
-     * {@code usableCapacity - occupied}. {@code occupancyRate} is null rather than zero when there
-     * is no usable capacity: a hospital with no beds has no occupancy, and 0% would read as empty.
+     * <p>{@code usableCapacity} is every bed the hospital has minus the ones under maintenance,
+     * because a bed under maintenance is not capacity anyone can sell. Everything else stays in the
+     * denominator: cleaning beds are capacity that is merely not free this minute, and a bed whose
+     * status the domain does not recognise is still a bed — it is reported separately in
+     * {@code unknownStatusCount} for observability, not quietly removed from the hospital's size.
+     * That is why {@code currentlyAvailable} is narrower than {@code usableCapacity - occupied}.
+     * {@code occupancyRate} is null rather than zero when there is no usable capacity: a hospital
+     * with no beds has no occupancy, and 0% would read as empty.
      */
     public record BedsBlock(long occupied, long usableCapacity, long currentlyAvailable,
                             long cleaning, long maintenance, long unknownStatusCount,

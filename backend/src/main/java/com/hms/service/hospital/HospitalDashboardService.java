@@ -86,7 +86,7 @@ public class HospitalDashboardService {
         dto.setFrom(from);
         dto.setToExclusive(toExclusive);
         dto.setTimezone(businessClock.zoneId().getId());
-        dto.setCore(core(hospitalId, from, toExclusive));
+        dto.setCore(core(hospitalId));
 
         if (capabilities.contains(EntitlementRegistry.OPD)) {
             dto.setOpd(opdBlock(hospitalId, range, today, from, toExclusive));
@@ -106,16 +106,18 @@ public class HospitalDashboardService {
         return dto;
     }
 
-    private DashboardOverviewDTO.Core core(Long hospitalId, LocalDateTime from, LocalDateTime toExclusive) {
+    private DashboardOverviewDTO.Core core(Long hospitalId) {
         // Registered patients is a running total, not a windowed one: the range selector moves the
-        // activity numbers, never the size of the roll.
-        long registered = patientRepository.countByHospitalIdAndIsActiveTrue(hospitalId);
-        long consultations = medicalRecordRepository.countOpdConsultationsInRange(hospitalId, from, toExclusive);
-        return new DashboardOverviewDTO.Core(registered, consultations);
+        // activity numbers, never the size of the roll. Active only, which is what
+        // HospitalStatsService and PatientService already mean by a hospital's patient count.
+        return new DashboardOverviewDTO.Core(patientRepository.countByHospitalIdAndIsActiveTrue(hospitalId));
     }
 
     private DashboardOverviewDTO.OpdBlock opdBlock(Long hospitalId, DashboardRange range,
             LocalDate today, LocalDateTime from, LocalDateTime toExclusive) {
+
+        // Inside the OPD gate, so this query does not run for a hospital without the capability.
+        long consultations = medicalRecordRepository.countOpdConsultationsInRange(hospitalId, from, toExclusive);
 
         List<DashboardOverviewDTO.VisitTypeCount> visitTypes = new ArrayList<>();
         long total = 0;
@@ -139,7 +141,7 @@ public class HospitalDashboardService {
             specialities.add(new DashboardOverviewDTO.SpecialityCount(speciality, asLong(row[1])));
         }
 
-        return new DashboardOverviewDTO.OpdBlock(total, trend, visitTypes, specialities);
+        return new DashboardOverviewDTO.OpdBlock(consultations, total, trend, visitTypes, specialities);
     }
 
     private DashboardOverviewDTO.IpdBlock ipdBlock(Long hospitalId, DashboardRange range,
@@ -169,7 +171,11 @@ public class HospitalDashboardService {
             else unknown += count;
         }
 
-        long usableCapacity = occupied + available + cleaning;
+        // Every bed the hospital has, less the ones under maintenance. An unrecognised status is
+        // still a bed and still counts toward the hospital's size; it simply cannot be claimed as
+        // occupied, available or cleaning, so it is surfaced on its own instead of being guessed at.
+        long allBeds = occupied + available + cleaning + maintenance + unknown;
+        long usableCapacity = allBeds - maintenance;
         Double occupancyRate = usableCapacity == 0
                 ? null
                 : BigDecimal.valueOf(occupied * 100.0 / usableCapacity)

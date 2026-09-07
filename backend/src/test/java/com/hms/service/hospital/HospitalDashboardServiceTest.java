@@ -13,6 +13,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.jdbc.AutoConfigureTestDatabase;
 import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest;
 import org.springframework.boot.test.mock.mockito.MockBean;
+import org.springframework.boot.test.mock.mockito.SpyBean;
 import org.springframework.context.annotation.Import;
 import org.springframework.test.context.ActiveProfiles;
 
@@ -22,6 +23,8 @@ import java.time.LocalDateTime;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
@@ -53,7 +56,9 @@ class HospitalDashboardServiceTest {
     @Autowired PatientRepository patientRepository;
     @Autowired DoctorRepository doctorRepository;
     @Autowired OpdRepository opdRepository;
-    @Autowired MedicalRecordRepository medicalRecordRepository;
+    // Spied, not mocked: it still reads the real database, but the service's calls to it are
+    // recorded so a test can prove the OPD gate stopped a query rather than merely hid its result.
+    @SpyBean MedicalRecordRepository medicalRecordRepository;
     @Autowired IpdAdmissionRepository ipdAdmissionRepository;
     @Autowired BedRepository bedRepository;
     @Autowired BillingPaymentRepository billingPaymentRepository;
@@ -86,11 +91,38 @@ class HospitalDashboardServiceTest {
     }
 
     @Test
+    void withoutOpdTheConsultationQueryIsNeverEvenRun() {
+        // The rule has two halves. Hiding the block is the visible half; not asking the database
+        // is the other, and only the second one is a gate. Consultations sat on the core block
+        // until this review, where they ran for every hospital including those without OPD.
+        mine = myHospital("IPD");
+
+        DashboardOverviewDTO result = dashboard.getOverview(DashboardRange.TODAY);
+
+        assertThat(result.getOpd()).as("no OPD capability, no OPD block").isNull();
+        assertThat(result.getCore()).isNotNull();
+        verify(medicalRecordRepository, never())
+                .countOpdConsultationsInRange(org.mockito.ArgumentMatchers.anyLong(),
+                        org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any());
+    }
+
+    @Test
+    void withOpdButNoActivityConsultationsAreAHonestZero() {
+        mine = myHospital("OPD");
+
+        DashboardOverviewDTO.OpdBlock opd = dashboard.getOverview(DashboardRange.TODAY).getOpd();
+
+        assertThat(opd).isNotNull();
+        assertThat(opd.consultations()).isZero();
+    }
+
+    @Test
     void anOwnedModuleWithNoActivityStillGetsItsBlockWithZeros() {
         mine = myHospital("OPD", "IPD", "BILLING", "PHARMACY");
 
         DashboardOverviewDTO result = dashboard.getOverview(DashboardRange.TODAY);
 
+        assertThat(result.getOpd().consultations()).isZero();
         assertThat(result.getOpd().count()).isZero();
         assertThat(result.getOpd().trend()).hasSize(1).allSatisfy(b -> assertThat(b.count()).isZero());
         assertThat(result.getOpd().visitTypes()).isEmpty();
@@ -145,7 +177,7 @@ class HospitalDashboardServiceTest {
         DashboardOverviewDTO result = dashboard.getOverview(DashboardRange.TODAY);
 
         assertThat(result.getCore().totalRegisteredPatients()).isZero();
-        assertThat(result.getCore().opdConsultations()).isZero();
+        assertThat(result.getOpd().consultations()).isZero();
         assertThat(result.getOpd().count()).isZero();
         assertThat(result.getIpd().admissions()).isZero();
         assertThat(result.getBilling().collection()).isEqualByComparingTo(BigDecimal.ZERO);
@@ -195,6 +227,32 @@ class HospitalDashboardServiceTest {
                 new DashboardOverviewDTO.SpecialityCount("Orthopedics", 1));
         assertThat(opd.busiestSpecialities().stream().mapToLong(DashboardOverviewDTO.SpecialityCount::count).sum())
                 .as("buckets always account for every visit").isEqualTo(opd.count());
+    }
+
+    /**
+     * Count alone is not a total order. Two specialities tied on the last visible row would swap
+     * places between one page load and the next, and a chart that reshuffles while nothing changed
+     * is a chart nobody trusts.
+     */
+    @Test
+    void tiedSpecialitiesComeBackInTheSameOrderEveryTime() {
+        mine = myHospital("OPD");
+        Patient p = patient(mine);
+        opd(p, doctor(mine, "Radiology"), DAY.atTime(9, 0), Opd.VisitType.NEW);
+        opd(p, doctor(mine, "Cardiology"), DAY.atTime(9, 30), Opd.VisitType.NEW);
+        opd(p, doctor(mine, "Dermatology"), DAY.atTime(10, 0), Opd.VisitType.NEW);
+        em.flush();
+        em.clear();
+
+        List<DashboardOverviewDTO.SpecialityCount> first =
+                dashboard.getOverview(DashboardRange.TODAY).getOpd().busiestSpecialities();
+        List<DashboardOverviewDTO.SpecialityCount> again =
+                dashboard.getOverview(DashboardRange.TODAY).getOpd().busiestSpecialities();
+
+        assertThat(first).containsExactlyElementsOf(again);
+        assertThat(first).extracting(DashboardOverviewDTO.SpecialityCount::speciality)
+                .as("all tied on one visit, so the bucket name is the tie-break")
+                .containsExactly("Cardiology", "Dermatology", "Radiology");
     }
 
     // ── time ─────────────────────────────────────────────────────────────────
@@ -251,7 +309,7 @@ class HospitalDashboardServiceTest {
         em.flush();
         em.clear();
 
-        assertThat(dashboard.getOverview(DashboardRange.TODAY).getCore().opdConsultations())
+        assertThat(dashboard.getOverview(DashboardRange.TODAY).getOpd().consultations())
                 .isEqualTo(2);
     }
 
@@ -272,13 +330,41 @@ class HospitalDashboardServiceTest {
         DashboardOverviewDTO.BedsBlock beds = dashboard.getOverview(DashboardRange.TODAY).getBeds();
 
         assertThat(beds.occupied()).isEqualTo(2);
-        assertThat(beds.usableCapacity()).as("occupied + available + cleaning").isEqualTo(4);
+        assertThat(beds.usableCapacity()).as("all six beds less the one under maintenance").isEqualTo(5);
         assertThat(beds.currentlyAvailable()).as("cleaning is capacity but not free").isEqualTo(1);
         assertThat(beds.cleaning()).isEqualTo(1);
         assertThat(beds.maintenance()).isEqualTo(1);
         assertThat(beds.unknownStatusCount()).isEqualTo(1);
-        assertThat(beds.occupancyRate()).isEqualTo(50.0);
+        assertThat(beds.occupancyRate()).as("2 of 5").isEqualTo(40.0);
         assertThat(beds.asOf()).isEqualTo(DAY.atTime(14, 30));
+    }
+
+    /**
+     * The agreed formula, on the agreed numbers. A bed whose status nobody recognises is still a
+     * bed the hospital owns: it cannot be claimed as occupied, available or cleaning, but removing
+     * it from the denominator would quietly shrink the hospital and inflate the occupancy figure
+     * that gets quoted in meetings. It stays in, and it is reported on its own line.
+     */
+    @Test
+    void anUnknownStatusBedIsStillABedTheHospitalHas() {
+        mine = myHospital("IPD");
+        for (int i = 0; i < 4; i++) bed(mine, BedStatus.OCCUPIED);
+        for (int i = 0; i < 2; i++) bed(mine, BedStatus.AVAILABLE);
+        for (int i = 0; i < 2; i++) bed(mine, BedStatus.MAINTENANCE);
+        bed(mine, BedStatus.CLEANING);
+        bed(mine, "imported-from-old-system");
+        em.flush();
+        em.clear();
+
+        DashboardOverviewDTO.BedsBlock beds = dashboard.getOverview(DashboardRange.TODAY).getBeds();
+
+        assertThat(beds.usableCapacity()).as("10 beds less 2 under maintenance").isEqualTo(8);
+        assertThat(beds.occupied()).isEqualTo(4);
+        assertThat(beds.occupancyRate()).as("4 of 8").isEqualTo(50.0);
+        assertThat(beds.currentlyAvailable()).as("the unknown bed is not free").isEqualTo(2);
+        assertThat(beds.cleaning()).as("nor is it cleaning").isEqualTo(1);
+        assertThat(beds.maintenance()).as("nor under maintenance").isEqualTo(2);
+        assertThat(beds.unknownStatusCount()).as("it is visible as exactly what it is").isEqualTo(1);
     }
 
     @Test

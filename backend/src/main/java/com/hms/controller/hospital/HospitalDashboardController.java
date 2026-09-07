@@ -1,6 +1,8 @@
 package com.hms.controller.hospital;
 
 import com.hms.dto.DashboardOverviewDTO;
+import com.hms.entity.HospitalType;
+import com.hms.security.TenantType;
 import com.hms.service.hospital.DashboardRange;
 import com.hms.service.hospital.HospitalDashboardService;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -24,12 +26,17 @@ import org.springframework.web.bind.annotation.RestController;
  * tenant without it. The service resolves capabilities per block and simply omits what the tenant
  * does not hold.
  *
- * <p>No clinic or pharmacy alias: this is the hospital admin's operational overview, and the other
- * facility types have their own dashboards.
+ * <p>Hospital tenants only, enforced rather than asserted. The endpoint is CORE, and
+ * {@code FacilityAccessAspect} deliberately waves CORE controllers through for every facility type,
+ * so being CORE is what makes a clinic or pharmacy able to reach it. {@code @TenantType} is the
+ * mechanism the ICU, OT and Recovery controllers already use to say "this facility type only", and
+ * it is used here for the same reason: the blocks below describe wards, beds and inpatient
+ * admissions, which a clinic or pharmacy does not have.
  */
 @RestController
 @RequestMapping("/hospital/dashboard")
 @PreAuthorize("hasRole('HOSPITAL_ADMIN')")
+@TenantType(HospitalType.HOSPITAL)
 public class HospitalDashboardController {
 
     @Autowired private HospitalDashboardService dashboardService;

@@ -174,6 +174,12 @@ public interface OpdRepository extends JpaRepository<Opd, Long> {
 	 * the CASE renders differently in SELECT and GROUP BY, which strict databases reject. The
 	 * caller names it. Unassigned also absorbs a missing doctor and a blank speciality, so the sum
 	 * of the buckets always equals the OPD total.
+	 *
+	 * <p>Ordering is count first and then the bucket itself, because count alone is not a total
+	 * order: two specialities tied on the fifth row would swap places between requests and the
+	 * chart would reshuffle while nothing changed. The tie-break repeats the CASE rather than
+	 * naming the doctor's column, so it orders by the same value the caller sees and cannot order
+	 * by a foreign tenant's speciality.
 	 */
 	@Query("SELECT CASE WHEN d.id IS NOT NULL AND d.hospitalId = p.hospitalId "
 			+ "AND d.specialization IS NOT NULL AND TRIM(d.specialization) <> '' "
@@ -184,7 +190,9 @@ public interface OpdRepository extends JpaRepository<Opd, Long> {
 			+ "GROUP BY CASE WHEN d.id IS NOT NULL AND d.hospitalId = p.hospitalId "
 			+ "AND d.specialization IS NOT NULL AND TRIM(d.specialization) <> '' "
 			+ "THEN d.specialization ELSE NULL END "
-			+ "ORDER BY COUNT(o) DESC")
+			+ "ORDER BY COUNT(o) DESC, CASE WHEN d.id IS NOT NULL AND d.hospitalId = p.hospitalId "
+			+ "AND d.specialization IS NOT NULL AND TRIM(d.specialization) <> '' "
+			+ "THEN d.specialization ELSE NULL END ASC")
 	java.util.List<Object[]> countBySpecialityInRange(@Param("hospitalId") Long hospitalId,
 			@Param("from") java.time.LocalDateTime from,
 			@Param("toExclusive") java.time.LocalDateTime toExclusive,

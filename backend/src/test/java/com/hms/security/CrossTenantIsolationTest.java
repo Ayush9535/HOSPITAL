@@ -263,6 +263,25 @@ class CrossTenantIsolationTest {
                 .as("bravo must not see alpha's occupied bed").isEqualTo(0);
     }
 
+    /**
+     * The Overview describes wards, beds and inpatient admissions. Being a CORE controller is what
+     * lets any facility type reach it — FacilityAccessAspect waves CORE through — so the hospital
+     * restriction has to be stated with @TenantType or it is not stated at all.
+     */
+    @Test
+    void aClinicTenantCannotOpenTheHospitalOverview() {
+        long clinicId = seedHospital("clinic", false);
+        User clinicAdmin = seedUser(clinicId, "clinic");
+        String clinicToken = jwtUtil.generateToken(clinicAdmin.getId(), clinicAdmin.getEmail(),
+                clinicAdmin.getRole(), clinicId, MODULES, null, "CLINIC", null,
+                clinicAdmin.getTokenVersion());
+
+        int status = call(HttpMethod.GET, "/hospital/dashboard/overview", clinicToken, null)
+                .getStatusCode().value();
+
+        assertThat(status).as("a clinic has no wards to report on").isEqualTo(403);
+    }
+
     private JsonNode overviewFor(String token) {
         ResponseEntity<String> res = call(HttpMethod.GET, "/hospital/dashboard/overview", token, null);
         assertThat(res.getStatusCode().value()).as("the owner reads its own overview").isEqualTo(200);
