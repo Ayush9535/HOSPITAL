@@ -135,6 +135,11 @@ const HospitalAdminDashboard = () => {
   // Tenant-aware label: clinic logins say "Clinic" wherever we'd otherwise say "Hospital".
   const tenantWord = user?.hospitalType === 'CLINIC' ? 'Clinic' : 'Hospital';
   const isPharmacyTenant = user?.hospitalType === 'PHARMACY';
+  // The analytics endpoint is HOSPITAL-only and is not aliased for the other tenant types.
+  // Framed as "not one of the others" to match apiService, which rewrites /hospital/** only for
+  // an explicit CLINIC or PHARMACY session: a session with no hospitalType claim keeps the
+  // hospital namespace and reaches the endpoint, so it belongs on the analytics path too.
+  const isHospitalTenant = user?.hospitalType !== 'CLINIC' && user?.hospitalType !== 'PHARMACY';
   const pharmacyMode = modules.includes('MULTI_PHARMACY')
     ? 'MULTI'
     : modules.includes('SINGLE_PHARMACIST_ADMIN')
@@ -2562,9 +2567,147 @@ const HospitalAdminDashboard = () => {
             activeTab === 'overview' &&
             !loading && (
               <div className="space-y-6">
-                <AdminOverviewAnalytics />
+                {/* A clinic reaches this same dashboard, but the analytics endpoint is HOSPITAL-only
+                    and apiService rewrites /hospital/** to /clinic/** for a clinic session, so the
+                    request would not even reach it. Clinics therefore keep the Overview they had. */}
+                {isHospitalTenant ? (
+                  <AdminOverviewAnalytics />
+                ) : (
+                  <>
+                    <h2 className="text-2xl font-bold text-gray-900">Overview</h2>
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                      <div className="bg-white rounded-lg border border-gray-200 p-6">
+                        <div className="flex justify-between items-center">
+                          <div>
+                            <p className="text-gray-600 text-sm font-medium">
+                              Total Registered Patients
+                            </p>
+                            <h3 className="text-3xl font-bold text-gray-900 mt-1">
+                              {stats.totalRegisteredPatients || stats.totalPatients || 0}
+                            </h3>
+                          </div>
+                        </div>
+                      </div>
+                      <div className="bg-white rounded-lg border border-gray-200 p-6">
+                        <div className="flex justify-between items-center">
+                          <div>
+                            <p className="text-gray-600 text-sm font-medium">Patients This Month</p>
+                            <h3 className="text-3xl font-bold text-gray-900 mt-1">
+                              {stats.patientsThisMonth || 0}
+                            </h3>
+                          </div>
+                        </div>
+                      </div>
+                      <div className="bg-white rounded-lg border border-gray-200 p-6">
+                        <div className="flex justify-between items-center">
+                          <div>
+                            <p className="text-gray-600 text-sm font-medium">Patients Today</p>
+                            <h3 className="text-3xl font-bold text-gray-900 mt-1">
+                              {stats.patientsToday || 0}
+                            </h3>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </>
+                )}
 
-                <div className="grid grid-cols-1 gap-8 mt-8">
+                <div
+                  className={
+                    isHospitalTenant
+                      ? 'grid grid-cols-1 gap-8 mt-8'
+                      : 'grid grid-cols-1 lg:grid-cols-2 gap-8 mt-8'
+                  }
+                >
+                  {!isHospitalTenant && (
+                    <>
+                      {/* Left Div: Patients */}
+                      <div className="bg-white rounded-2xl border border-neutral-200 overflow-hidden shadow-sm flex flex-col">
+                        {/* Head */}
+                        <div className="px-6 py-5 border-b border-neutral-100 bg-neutral-50/50 flex flex-row justify-between items-center">
+                          <div>
+                            <h3 className="text-lg font-bold text-slate-800">Patients</h3>
+                            <p className="text-xs text-slate-500 mt-0.5">
+                              Manage registered hospital patients
+                            </p>
+                          </div>
+                          {user?.role === 'HOSPITAL_ADMIN' && (
+                            <button
+                              onClick={() => handleAdd('patients')}
+                              className="bg-sky-600 hover:bg-sky-700 text-white px-4 py-2 rounded-xl text-sm font-semibold shadow-sm transform hover:-translate-y-0.5 transition-all flex items-center gap-1.5"
+                            >
+                              <svg
+                                xmlns="http://www.w3.org/2000/svg"
+                                className="h-4 w-4"
+                                viewBox="0 0 20 20"
+                                fill="currentColor"
+                              >
+                                <path
+                                  fillRule="evenodd"
+                                  d="M10 3a1 1 0 011 1v5h5a1 1 0 110 2h-5v5a1 1 0 11-2 0v-5H4a1 1 0 110-2h5V4a1 1 0 011-1z"
+                                  clipRule="evenodd"
+                                />
+                              </svg>
+                              <span>Add Patient</span>
+                            </button>
+                          )}
+                        </div>
+                        {/* Body */}
+                        <div className="p-6 flex-1">
+                          {/* Search Input for patients */}
+                          <div className="relative mb-4">
+                            <input
+                              type="text"
+                              placeholder="Search patients..."
+                              value={patientsSearchInput}
+                              onChange={(e) => setPatientsSearchInput(e.target.value)}
+                              className="pl-9 pr-4 py-2 border border-neutral-300 rounded-xl text-sm focus:ring-2 focus:ring-primary-500 focus:border-transparent w-full transition-all bg-neutral-50 focus:bg-white text-slate-800 placeholder-slate-400"
+                            />
+                            <span className="absolute left-3 top-2.5 text-slate-400">
+                              <svg
+                                xmlns="http://www.w3.org/2000/svg"
+                                className="h-4 w-4"
+                                fill="none"
+                                viewBox="0 0 24 24"
+                                stroke="currentColor"
+                              >
+                                <path
+                                  strokeLinecap="round"
+                                  strokeLinejoin="round"
+                                  strokeWidth={2}
+                                  d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"
+                                />
+                              </svg>
+                            </span>
+                          </div>
+                          {patients.length > 0 ? (
+                            <PatientsTable
+                              patients={patients}
+                              onEdit={(item) => handleEdit(item, 'patients')}
+                              onViewDetails={handleViewDetails}
+                              onDelete={handleDeletePatient}
+                              onHistory={(p) =>
+                                setPatientDetailsModal({ isOpen: true, patient: p })
+                              }
+                              startIndex={patientsPage * pageSize}
+                              pagination={patientsPagination}
+                              isAdmin={user?.role === 'HOSPITAL_ADMIN'}
+                            />
+                          ) : (
+                            <EmptyState
+                              icon={null}
+                              title="No Patients Found"
+                              message="There are no patients registered in the system yet."
+                              actionLabel="Add Patient"
+                              onAction={
+                                user?.role === 'HOSPITAL_ADMIN' ? () => handleAdd('patients') : null
+                              }
+                            />
+                          )}
+                        </div>
+                      </div>
+                    </>
+                  )}
                   {/* Today's Appointments — operational appointment UI, so it renders only for a
                       tenant that holds the APPOINTMENTS module. Historical clinical data is a
                       different thing and is NOT hidden here: past appointments stay readable

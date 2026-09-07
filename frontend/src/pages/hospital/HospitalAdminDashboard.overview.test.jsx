@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
@@ -27,18 +27,66 @@ describe('Hospital Admin Overview composition', () => {
     expect(source).toContain('<AdminOverviewAnalytics />');
   });
 
-  it('no longer carries the Overview patient counters', () => {
-    // These three cards were the top of the old Overview. Two of them duplicated numbers the
-    // analytics panel now reports properly, and the third was mislabelled: it counted active
-    // patients while calling them registered.
-    expect(source).not.toContain('Total Registered Patients');
-    expect(source).not.toContain('Patients This Month');
-    expect(source).not.toContain('Patients Today');
+  it('shows the analytics panel to hospital tenants only', () => {
+    // The analytics endpoint is HOSPITAL-only, and apiService rewrites /hospital/** to
+    // /clinic/** for a clinic session — a clinic would not merely be shown the wrong screen,
+    // its request would never reach the endpoint at all.
+    expect(source).toContain('{isHospitalTenant ? (');
+    expect(source).toMatch(/\{isHospitalTenant \? \(\s*<AdminOverviewAnalytics \/>/);
+    expect(source.match(/<AdminOverviewAnalytics \/>/g)).toHaveLength(1);
   });
 
-  it('no longer carries the Overview patient list panel', () => {
-    expect(source).not.toContain('Manage registered hospital patients');
-    expect(source).not.toContain('{/* Left Div: Patients */}');
+  it('derives the tenant from the session user, not from what the response happens to contain', () => {
+    expect(source).toContain(
+      "user?.hospitalType !== 'CLINIC' && user?.hospitalType !== 'PHARMACY'"
+    );
+  });
+
+  it('keeps the previous Overview for clinic tenants', () => {
+    // Recovered from the base commit rather than rewritten: a clinic sees exactly the screen it
+    // saw before this feature existed.
+    expect(source).toContain('Total Registered Patients');
+    expect(source).toContain('Patients This Month');
+    expect(source).toContain('Patients Today');
+    expect(source).toContain('Manage registered hospital patients');
+    expect(source).toContain('{!isHospitalTenant && (');
+  });
+
+  it('gives the patient counters and list to the clinic branch only', () => {
+    // Everything the hospital Overview dropped now lives behind the clinic side of the branch,
+    // so a hospital admin cannot see the patient list return through the back door.
+    const clinicBranch = source.slice(
+      source.indexOf('{isHospitalTenant ? ('),
+      source.indexOf('Today&apos;s Appointments')
+    );
+    expect(clinicBranch).toContain('Total Registered Patients');
+    expect(clinicBranch).toContain('Manage registered hospital patients');
+    expect(clinicBranch).toContain('{!isHospitalTenant && (');
+  });
+
+  it('leaves the pharmacy Overview untouched', () => {
+    expect(source).toContain("{activeTab === 'overview' && !loading && isPharmacyTenant ? (");
+  });
+
+  it('reaches the analytics endpoint from exactly one component', () => {
+    // The clinic and pharmacy Overviews cannot call an endpoint nothing on their path calls.
+    // Only the service that declares it and the component the hospital branch renders may name
+    // it; a second call site would be a route around the tenant check above.
+    const srcRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
+    const callers = [];
+    const walk = (dir) => {
+      for (const entry of readdirSync(dir)) {
+        const full = join(dir, entry);
+        if (statSync(full).isDirectory()) {
+          walk(full);
+        } else if (/\.(js|jsx)$/.test(entry) && !/\.test\./.test(entry)) {
+          if (readFileSync(full, 'utf8').includes('getDashboardOverview')) callers.push(entry);
+        }
+      }
+    };
+    walk(srcRoot);
+
+    expect(callers.sort()).toEqual(['AdminOverviewAnalytics.jsx', 'hospitalService.js']);
   });
 
   it('keeps patient management intact on its own tab', () => {
@@ -57,11 +105,10 @@ describe('Hospital Admin Overview composition', () => {
     expect(source).toContain('{hasAppointments && (');
   });
 
-  it('does not leave the remaining Overview panel in a half-empty two-column grid', () => {
-    // The old grid was lg:grid-cols-2 with the patient list on the left. With the left column
-    // gone, keeping two columns would strand Today's Appointments in half a screen — the same
-    // shape as the Doctor Overview regression.
-    expect(source).not.toContain('grid grid-cols-1 lg:grid-cols-2 gap-8 mt-8');
-    expect(source).toContain('grid grid-cols-1 gap-8 mt-8');
+  it('drops to one column for hospitals, where the patient list no longer sits beside it', () => {
+    // Two columns with the left one gone would strand Today's Appointments in half a screen —
+    // the same shape as the Doctor Overview regression. A clinic still has both, so it keeps two.
+    expect(source).toContain("? 'grid grid-cols-1 gap-8 mt-8'");
+    expect(source).toContain(": 'grid grid-cols-1 lg:grid-cols-2 gap-8 mt-8'");
   });
 });

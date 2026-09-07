@@ -67,7 +67,7 @@ const settled = async () =>
   waitFor(() => expect(screen.queryByTestId('overview-analytics-loading')).not.toBeInTheDocument());
 
 describe('AdminOverviewAnalytics', () => {
-  beforeEach(() => vi.clearAllMocks());
+  beforeEach(() => vi.resetAllMocks());
   afterEach(() => cleanup());
 
   // ── core ───────────────────────────────────────────────────────────────────
@@ -350,6 +350,212 @@ describe('AdminOverviewAnalytics', () => {
     expect(screen.getByText('Collection')).toBeInTheDocument();
     // Not hard-coded to INR just because most tenants are Indian.
     expect(screen.getByText(/\$45,000/)).toBeInTheDocument();
+  });
+
+  // ── stale responses ───────────────────────────────────────────────────────
+
+  /** A promise whose settlement this test controls, so response order can be chosen. */
+  const deferred = () => {
+    let resolve;
+    let reject;
+    const promise = new Promise((res, rej) => {
+      resolve = res;
+      reject = rej;
+    });
+    return { promise, resolve, reject };
+  };
+
+  it('ignores an older response that arrives after a newer one', async () => {
+    const user = userEvent.setup();
+    const today = deferred();
+    const week = deferred();
+    hospitalService.getDashboardOverview
+      .mockReturnValueOnce(today.promise)
+      .mockReturnValueOnce(week.promise);
+
+    render(<AdminOverviewAnalytics />);
+    await user.click(screen.getByRole('button', { name: 'Last 7 Days' }));
+
+    // The newer request comes back first.
+    week.resolve(overview({ core: { totalRegisteredPatients: 777 } }));
+    await waitFor(() => expect(screen.getByText('777')).toBeInTheDocument());
+
+    // The older one lands afterwards and must not be allowed to write anything.
+    today.resolve(overview({ core: { totalRegisteredPatients: 111 } }));
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(screen.getByText('777')).toBeInTheDocument();
+    expect(screen.queryByText('111')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Last 7 Days' })).toHaveAttribute(
+      'aria-pressed',
+      'true'
+    );
+  });
+
+  it('ignores an older failure that arrives after a newer success', async () => {
+    const user = userEvent.setup();
+    const today = deferred();
+    const week = deferred();
+    hospitalService.getDashboardOverview
+      .mockReturnValueOnce(today.promise)
+      .mockReturnValueOnce(week.promise);
+
+    render(<AdminOverviewAnalytics />);
+    await user.click(screen.getByRole('button', { name: 'Last 7 Days' }));
+
+    week.resolve(overview({ core: { totalRegisteredPatients: 777 } }));
+    await waitFor(() => expect(screen.getByText('777')).toBeInTheDocument());
+
+    today.reject(new Error('the abandoned request finally gave up'));
+    await new Promise((r) => setTimeout(r, 0));
+
+    // A dead request must not be able to tear down a screen that is correct.
+    expect(screen.getByText('777')).toBeInTheDocument();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
+  it('still shows the error when it is the current request that fails', async () => {
+    const user = userEvent.setup();
+    const today = deferred();
+    const week = deferred();
+    hospitalService.getDashboardOverview
+      .mockReturnValueOnce(today.promise)
+      .mockReturnValueOnce(week.promise);
+
+    render(<AdminOverviewAnalytics />);
+    await user.click(screen.getByRole('button', { name: 'Last 7 Days' }));
+
+    today.resolve(overview({ core: { totalRegisteredPatients: 111 } }));
+    week.reject(new Error('boom'));
+
+    // Guarding stale responses must not also swallow the one that matters.
+    await screen.findByRole('alert');
+    expect(screen.queryByText('111')).not.toBeInTheDocument();
+  });
+
+  it('retries the currently selected range, and an abandoned request cannot overwrite the retry', async () => {
+    const user = userEvent.setup();
+    const abandoned = deferred(); // the initial TODAY request, still in flight
+    const month = deferred();
+    const retried = deferred();
+    hospitalService.getDashboardOverview
+      .mockReturnValueOnce(abandoned.promise)
+      .mockReturnValueOnce(month.promise)
+      .mockReturnValueOnce(retried.promise);
+
+    render(<AdminOverviewAnalytics />);
+    await user.click(screen.getByRole('button', { name: 'Last 30 Days' }));
+
+    month.reject(new Error('boom'));
+    await screen.findByRole('alert');
+
+    await user.click(screen.getByRole('button', { name: 'Retry' }));
+    // Retry means "this range again", not "whatever range failed first".
+    expect(hospitalService.getDashboardOverview).toHaveBeenLastCalledWith('LAST_30_DAYS');
+
+    retried.resolve(overview({ core: { totalRegisteredPatients: 777 } }));
+    await waitFor(() => expect(screen.getByText('777')).toBeInTheDocument());
+
+    // The very first request finally answers, long after it stopped mattering.
+    abandoned.resolve(overview({ core: { totalRegisteredPatients: 111 } }));
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(screen.getByText('777')).toBeInTheDocument();
+    expect(screen.queryByText('111')).not.toBeInTheDocument();
+  });
+
+  // ── money ─────────────────────────────────────────────────────────────────
+
+  it.each([
+    ['zero stays zero without inventing decimals', 0, 'INR', /₹0/],
+    ['a small collection is not rounded away to nothing', 0.49, 'INR', /₹0\.49/],
+    ['paise are preserved, not rounded up', 1234.56, 'INR', /₹1,234\.56/],
+    [
+      'a large decimal keeps both its scale and its fraction',
+      98765432.75,
+      'INR',
+      /₹9,87,65,432\.75/,
+    ],
+  ])('%s', async (_name, collection, currency, expected) => {
+    hospitalService.getDashboardOverview.mockResolvedValue(
+      overview({ billing: { collection, currency } })
+    );
+    render(<AdminOverviewAnalytics />);
+    await settled();
+
+    expect(screen.getByText(expected)).toBeInTheDocument();
+  });
+
+  it('renders a malformed currency code without taking the dashboard down', async () => {
+    hospitalService.getDashboardOverview.mockResolvedValue(
+      overview({ ...opdBlock, billing: { collection: 1234.56, currency: 'NOT-A-CURRENCY' } })
+    );
+    render(<AdminOverviewAnalytics />);
+    await settled();
+
+    // The amount still has to be readable, and the rest of the page still has to render.
+    expect(screen.getByText(/1,234\.56/)).toBeInTheDocument();
+    expect(screen.getByText('Collection')).toBeInTheDocument();
+    expect(screen.getByText('OPD Visits')).toBeInTheDocument();
+  });
+
+  // ── explicit nulls and zero-valued blocks ─────────────────────────────────
+
+  it('treats an explicitly null block the same as an absent one', async () => {
+    hospitalService.getDashboardOverview.mockResolvedValue({
+      ...overview(),
+      opd: null,
+      ipd: null,
+      beds: null,
+      billing: null,
+      pharmacy: null,
+    });
+    render(<AdminOverviewAnalytics />);
+    await settled();
+
+    expect(screen.getByText('Active Patients')).toBeInTheDocument();
+    expect(screen.queryByText('OPD Visits')).not.toBeInTheDocument();
+    expect(screen.queryByText('Admissions')).not.toBeInTheDocument();
+    expect(screen.queryByText('Bed Occupancy')).not.toBeInTheDocument();
+    expect(screen.queryByText('Collection')).not.toBeInTheDocument();
+    expect(screen.queryByText('Pharmacy Sales')).not.toBeInTheDocument();
+  });
+
+  it('renders beds even when IPD is absent, because the server decides that pairing', async () => {
+    hospitalService.getDashboardOverview.mockResolvedValue(overview(bedsBlock()));
+    render(<AdminOverviewAnalytics />);
+    await settled();
+
+    expect(screen.getByText('Bed Status')).toBeInTheDocument();
+    expect(screen.queryByText('IPD Trend')).not.toBeInTheDocument();
+  });
+
+  it('renders every owned block at zero rather than hiding the quiet ones', async () => {
+    hospitalService.getDashboardOverview.mockResolvedValue(
+      overview({
+        opd: { consultations: 0, count: 0, trend: [], visitTypes: [], busiestSpecialities: [] },
+        ipd: { admissions: 0, trend: [] },
+        ...bedsBlock({
+          occupied: 0,
+          usableCapacity: 0,
+          currentlyAvailable: 0,
+          cleaning: 0,
+          maintenance: 0,
+          occupancyRate: null,
+        }),
+        billing: { collection: 0, currency: 'INR' },
+        pharmacy: { pharmacySales: 0 },
+      })
+    );
+    render(<AdminOverviewAnalytics />);
+    await settled();
+
+    expect(screen.getByText('OPD Visits')).toBeInTheDocument();
+    expect(screen.getByText('Admissions')).toBeInTheDocument();
+    expect(screen.getByText('Bed Status')).toBeInTheDocument();
+    expect(screen.getByText('Collection')).toBeInTheDocument();
+    expect(screen.getByText('Pharmacy Sales')).toBeInTheDocument();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
 
   // ── layout ────────────────────────────────────────────────────────────────

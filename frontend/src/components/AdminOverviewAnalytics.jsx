@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Area,
   AreaChart,
@@ -11,7 +11,7 @@ import {
   YAxis,
 } from 'recharts';
 import hospitalService from '../services/hospitalService';
-import { SkeletonLine, SkeletonRect, SkeletonStatsGrid } from './Skeleton';
+import { SkeletonRect, SkeletonStatsGrid } from './Skeleton';
 
 /**
  * The Hospital Admin's operational overview.
@@ -64,19 +64,36 @@ const panelColsFor = (count) => {
 
 const formatNumber = (value) => new Intl.NumberFormat('en-IN').format(value ?? 0);
 
-/** Uses the currency the backend reported. Hard-coding INR would be wrong the day it is not. */
+/**
+ * Money, at the precision the backend actually sent.
+ *
+ * <p>Collection is a sum of payments and arrives as a decimal. Rounding it to whole units — which
+ * an earlier version did — turns 0.49 into 0 and 1234.56 into 1,235: a day's takings reported as
+ * nothing, and a figure that will not reconcile against the billing screen. Fractions are shown
+ * when there are any and omitted when there are none, so a round number still reads as a round
+ * number. The currency is the one the response carried; hard-coding INR would be wrong the day it
+ * is not.
+ */
 const formatMoney = (amount, currency) => {
   const value = Number(amount ?? 0);
+  if (!Number.isFinite(value)) return '—';
+  const hasFraction = !Number.isInteger(value);
+  const options = {
+    style: 'currency',
+    currency: currency || 'INR',
+    minimumFractionDigits: hasFraction ? 2 : 0,
+    maximumFractionDigits: 2,
+  };
   try {
-    return new Intl.NumberFormat('en-IN', {
-      style: 'currency',
-      currency: currency || 'INR',
-      minimumFractionDigits: 0,
-      maximumFractionDigits: 0,
-    }).format(value);
+    return new Intl.NumberFormat('en-IN', options).format(value);
   } catch {
-    // An unrecognised currency code must not take the card down with it.
-    return `${currency || ''} ${formatNumber(Math.round(value))}`.trim();
+    // An unrecognised or malformed currency code must not take the card — or the page — down.
+    // Intl throws on a bad code, so fall back to the number with the code beside it.
+    const plain = new Intl.NumberFormat('en-IN', {
+      minimumFractionDigits: hasFraction ? 2 : 0,
+      maximumFractionDigits: 2,
+    }).format(value);
+    return `${currency || ''} ${plain}`.trim();
   }
 };
 
@@ -184,19 +201,33 @@ const AdminOverviewAnalytics = () => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
+  // Every load takes a ticket, and only the holder of the latest one may write state. Requests
+  // are not guaranteed to come back in the order they were sent: switch from Today to Last 7 Days
+  // on a slow link and the Today response can land second, overwriting the newer numbers under
+  // the newer label. That applies to failures too — a stale rejection must not replace a current
+  // success with an error — and to the loading flag, which a stale request must not clear while a
+  // newer one is still in flight. StrictMode's double-invoked effects are the same problem in
+  // development, and the same ticket resolves them: the first pass simply loses.
+  const requestId = useRef(0);
+
   const load = useCallback(async (selectedRange) => {
+    const ticket = (requestId.current += 1);
+    const isCurrent = () => requestId.current === ticket;
+
     setLoading(true);
     setError(null);
     try {
       const overview = await hospitalService.getDashboardOverview(selectedRange);
+      if (!isCurrent()) return;
       setData(overview);
     } catch (err) {
+      if (!isCurrent()) return;
       // Deliberately no partial data: a failed load must not leave the previous range's numbers
       // on screen under a new label, and must never be mistaken for a quiet day.
       setData(null);
       setError(err?.response?.data?.error || 'Could not load the overview.');
     } finally {
-      setLoading(false);
+      if (isCurrent()) setLoading(false);
     }
   }, []);
 
@@ -446,31 +477,33 @@ const AdminOverviewAnalytics = () => {
     return list;
   }, [data]);
 
-  if (loading) {
-    // Skeletons rather than zeros: a zero that is really "not loaded yet" is a number someone
-    // could act on.
-    return (
-      <div className="space-y-6" data-testid="overview-analytics-loading">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <SkeletonLine width="w-40" height="h-6" />
-          <SkeletonLine width="w-56" height="h-8" />
-        </div>
-        <SkeletonStatsGrid count={4} />
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-          <SkeletonRect width="w-full" height="h-64" rounded="rounded-2xl" />
-          <SkeletonRect width="w-full" height="h-64" rounded="rounded-2xl" />
-        </div>
-      </div>
-    );
-  }
+  // The header is outside every branch below. The range selector has to stay on screen and keep
+  // its focus while a request is in flight — swapping it out for a skeleton on each fetch makes
+  // changing your mind mid-load impossible and moves focus out from under the keyboard.
+  const header = (
+    <div className="flex flex-wrap items-center justify-between gap-3">
+      <h2 className="text-2xl font-bold text-gray-900">Overview</h2>
+      {rangeSelector}
+    </div>
+  );
 
-  if (error) {
-    return (
-      <div className="space-y-4">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <h2 className="text-2xl font-bold text-gray-900">Overview</h2>
-          {rangeSelector}
+  const body = () => {
+    if (loading) {
+      // Skeletons rather than zeros: a zero that is really "not loaded yet" is a number someone
+      // could act on.
+      return (
+        <div className="space-y-6" data-testid="overview-analytics-loading">
+          <SkeletonStatsGrid count={4} />
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            <SkeletonRect width="w-full" height="h-64" rounded="rounded-2xl" />
+            <SkeletonRect width="w-full" height="h-64" rounded="rounded-2xl" />
+          </div>
         </div>
+      );
+    }
+
+    if (error) {
+      return (
         <div
           className="bg-white rounded-2xl border border-neutral-200 shadow-sm p-8 text-center"
           role="alert"
@@ -486,30 +519,32 @@ const AdminOverviewAnalytics = () => {
             Retry
           </button>
         </div>
-      </div>
+      );
+    }
+
+    return (
+      <>
+        <div className={`grid ${colsFor(kpis.length)} gap-4`}>
+          {kpis.map((card) => (
+            <KpiCard key={card.key} label={card.label} value={card.value} hint={card.hint} />
+          ))}
+        </div>
+
+        {panels.length > 0 ? (
+          <div className={`grid ${panelColsFor(panels.length)} gap-6`}>
+            {panels.map((panel) => (
+              <React.Fragment key={panel.key}>{panel.node}</React.Fragment>
+            ))}
+          </div>
+        ) : null}
+      </>
     );
-  }
+  };
 
   return (
     <div className="space-y-6">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <h2 className="text-2xl font-bold text-gray-900">Overview</h2>
-        {rangeSelector}
-      </div>
-
-      <div className={`grid ${colsFor(kpis.length)} gap-4`}>
-        {kpis.map((card) => (
-          <KpiCard key={card.key} label={card.label} value={card.value} hint={card.hint} />
-        ))}
-      </div>
-
-      {panels.length > 0 ? (
-        <div className={`grid ${panelColsFor(panels.length)} gap-6`}>
-          {panels.map((panel) => (
-            <React.Fragment key={panel.key}>{panel.node}</React.Fragment>
-          ))}
-        </div>
-      ) : null}
+      {header}
+      {body()}
     </div>
   );
 };
