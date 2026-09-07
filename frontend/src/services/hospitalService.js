@@ -16,6 +16,25 @@ import apiClient from './apiService';
  */
 
 const hospitalService = {
+  // ========== Dashboard APIs ==========
+
+  /**
+   * Hospital Admin operational overview.
+   *
+   * The range is sent as an enum name and never as dates. The business day is the hospital's,
+   * not the browser's: a client that computed "today" would answer in its own timezone and be a
+   * day out between midnight and 05:30 IST. The server owns the boundaries.
+   *
+   * The response omits any block the tenant's plan does not include, which is what the UI reads
+   * to decide what to render — an absent block is not the same fact as a zero.
+   *
+   * @param {'TODAY'|'LAST_7_DAYS'|'LAST_30_DAYS'} range
+   */
+  getDashboardOverview: async (range = 'TODAY') => {
+    const response = await apiClient.get(`/hospital/dashboard/overview?range=${range}`);
+    return response.data;
+  },
+
   // ========== Patient APIs ==========
 
   getPatients: async (search, page = 0, size = 10, date = '', view = '') => {
@@ -504,7 +523,10 @@ const hospitalService = {
     return response.data;
   },
 
-  dispenseMedicine: async (prescriptionId, { quantity, medicineId, idempotencyKey, remarks } = {}) => {
+  dispenseMedicine: async (
+    prescriptionId,
+    { quantity, medicineId, idempotencyKey, remarks } = {}
+  ) => {
     const response = await apiClient.post(`/hospital/pharmacy/dispense/${prescriptionId}`, {
       quantity,
       medicineId,
@@ -798,30 +820,35 @@ const hospitalService = {
    * Deliberately not optimistic — callers re-fetch rather than guess the new state.
    */
   arriveFollowUp: async (medicalRecordId, problem) => {
-    const response = await apiClient.post(
-      `/hospital/follow-ups/${medicalRecordId}/arrive`, { problem: problem || null });
+    const response = await apiClient.post(`/hospital/follow-ups/${medicalRecordId}/arrive`, {
+      problem: problem || null,
+    });
     return response.data;
   },
 
   /** Moves the follow-up. It stays outstanding; only the date changes. */
   rescheduleFollowUp: async (medicalRecordId, { newFollowUpDate, instructions, reason }) => {
-    const response = await apiClient.post(
-      `/hospital/follow-ups/${medicalRecordId}/reschedule`,
-      { newFollowUpDate, instructions: instructions || null, reason: reason || null });
+    const response = await apiClient.post(`/hospital/follow-ups/${medicalRecordId}/reschedule`, {
+      newFollowUpDate,
+      instructions: instructions || null,
+      reason: reason || null,
+    });
     return response.data;
   },
 
   /** Closes the follow-up without creating a visit. Doctor/admin only, server-enforced. */
   completeFollowUp: async (medicalRecordId, reason) => {
-    const response = await apiClient.post(
-      `/hospital/follow-ups/${medicalRecordId}/complete`, { reason: reason || null });
+    const response = await apiClient.post(`/hospital/follow-ups/${medicalRecordId}/complete`, {
+      reason: reason || null,
+    });
     return response.data;
   },
 
   /** Calls the follow-up off. The reason is required by the server. */
   cancelFollowUp: async (medicalRecordId, reason) => {
-    const response = await apiClient.post(
-      `/hospital/follow-ups/${medicalRecordId}/cancel`, { reason });
+    const response = await apiClient.post(`/hospital/follow-ups/${medicalRecordId}/cancel`, {
+      reason,
+    });
     return response.data;
   },
 
