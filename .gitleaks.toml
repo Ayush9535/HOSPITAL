@@ -1,0 +1,44 @@
+# Gitleaks configuration — used by .github/workflows/_security.yml (`gitleaks detect --config`)
+# and by the local pre-commit hook. Rationale & secret-handling policy:
+# docs/security/SECRET_HANDLING.md
+#
+# We extend Gitleaks' full default ruleset (AWS keys, GitHub/GitLab tokens, private keys,
+# JWTs, DB URLs, etc.) and add a TIGHT allowlist for known, non-sensitive test placeholders.
+# Keep the allowlist minimal — every entry is a hole in secret detection.
+
+title = "HMS Gitleaks Config"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Known non-secret test/CI placeholders and generated files"
+
+# Paths that never contain real secrets (lockfiles are hashes; SBOM/reports are generated).
+paths = [
+  '''package-lock\.json''',
+  '''frontend/package-lock\.json''',
+  '''.*\.sarif$''',
+  '''.*bom\.(json|xml)$''',
+]
+
+# Explicit non-secret literals that appear in test/CI fixtures. These are deliberately
+# obvious placeholders, never used against a real environment.
+regexes = [
+  '''ci-test-secret-not-used-in-real-environment''',
+  '''ci-test-secret''',
+  '''Passw0rd!''',                       # e2e default test password (overridden by env in real runs)
+  '''admin@e2e\.com''',
+  '''nobody@example\.com''',
+  '''HMS Backend Running''',             # public health-check response string
+  '''test-encryption-key-123''',         # obvious placeholder in a now-deleted test; still in git history (commit dd23ec8), which Gitleaks scans
+]
+
+# Common example/placeholder tokens across docs and .env.example style files.
+stopwords = [
+  'example',
+  'placeholder',
+  'changeme',
+  'your-secret-here',
+  'todo',
+]

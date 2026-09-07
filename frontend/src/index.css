@@ -3,7 +3,7 @@
 @tailwind components;
 @tailwind utilities;
 
-/* Base styles for better typography */
+/* Base styles for better typography and form controls normalization */
 @layer base {
     html {
         font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
@@ -14,6 +14,85 @@
         -webkit-font-smoothing: antialiased;
         -moz-osx-font-smoothing: grayscale;
         background-color: #fafafa;
+    }
+
+    /* Universal box-sizing reset for inputs/selects/textareas */
+    input, select, textarea, button {
+        box-sizing: border-box;
+        font-family: inherit;
+        font-size: inherit;
+        line-height: inherit;
+        margin: 0;
+    }
+
+    /* Ensure consistent style, padding, height, and border-box sizing across Windows and macOS */
+    input,
+    select,
+    textarea {
+        font-size: 0.875rem; /* Enforce standard 14px */
+        line-height: 1.25rem; /* Enforce standard 20px */
+        padding-top: 0.5rem; /* Enforce py-2 (8px) */
+        padding-bottom: 0.5rem; /* Enforce py-2 (8px) */
+        padding-left: 1rem; /* Enforce px-4 (16px) */
+        padding-right: 1rem; /* Enforce px-4 (16px) */
+        height: 2.5rem; /* Lock explicit height to 40px globally */
+        min-height: 2.5rem;
+        box-sizing: border-box;
+        -webkit-appearance: none;
+        -moz-appearance: none;
+        appearance: none;
+        border-radius: 0.5rem; /* standard rounded-lg (8px) */
+    }
+
+    /* Reset checkboxes and radios to browser defaults so they are not broken by the global input styling */
+    input[type="checkbox"] {
+        height: auto;
+        min-height: auto;
+        width: auto;
+        padding: 0;
+        -webkit-appearance: checkbox;
+        -moz-appearance: checkbox;
+        appearance: checkbox;
+    }
+    input[type="radio"] {
+        height: auto;
+        min-height: auto;
+        width: auto;
+        padding: 0;
+        -webkit-appearance: radio;
+        -moz-appearance: radio;
+        appearance: radio;
+    }
+
+    /* Textareas should not have a locked height, but consistent padding and borders */
+    textarea {
+        height: auto !important;
+        min-height: 5rem !important;
+    }
+
+    /* Custom premium vector select dropdown arrow for all platforms */
+    select {
+        background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%236b7280' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e") !important;
+        background-position: right 0.75rem center !important;
+        background-repeat: no-repeat !important;
+        background-size: 1.25rem 1.25rem !important;
+        padding-right: 2.5rem !important; /* Prevents text colliding with the arrow */
+        /* A fixed line-height (inherited from the shared input/select/textarea rule
+           above) fights the native select widget's own text-centering in some
+           browsers/OS combinations, clipping the option text against the fixed
+           2.5rem height instead of centering it. `normal` lets each browser center
+           its own control text correctly while the height/padding stay locked. */
+        line-height: normal !important;
+    }
+
+    /* Strip default platform number spin buttons for uniform spacing */
+    input[type="number"]::-webkit-inner-spin-button,
+    input[type="number"]::-webkit-outer-spin-button {
+        -webkit-appearance: none;
+        margin: 0;
+    }
+    input[type="number"] {
+        -moz-appearance: textfield;
     }
 }
 
@@ -252,17 +331,26 @@
     
     /* Loading states */
     .loading-shimmer {
-        background: linear-gradient(90deg, #f0f0f0 25%, #e0e0e0 50%, #f0f0f0 75%);
-        background-size: 200% 100%;
-        animation: shimmer 1.5s infinite;
+        background: linear-gradient(
+            90deg,
+            #f3f4f6 0%,
+            #f3f4f6 25%,
+            #e5e7eb 37%,
+            #d1d5db 50%,
+            #e5e7eb 63%,
+            #f3f4f6 75%,
+            #f3f4f6 100%
+        );
+        background-size: 400% 100%;
+        animation: shimmer 2s ease-in-out infinite;
     }
     
     @keyframes shimmer {
         0% {
-            background-position: -200% 0;
+            background-position: 100% 0;
         }
         100% {
-            background-position: 200% 0;
+            background-position: -100% 0;
         }
     }
 }

@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SpotBugs exclusion filter for the HMS backend. Suppresses categories that are
+  noisy or not actionable in a Spring Boot + Lombok codebase, keeping the report
+  focused on real correctness and security defects (SpotBugs + Find Security Bugs).
+  REPORT-ONLY in CI for now (see docs/quality/CODE_QUALITY.md).
+-->
+<FindBugsFilter>
+  <!-- Lombok-generated code -->
+  <Match>
+    <Bug pattern="EI_EXPOSE_REP,EI_EXPOSE_REP2"/>
+  </Match>
+
+  <!-- JPA entities: mutable exposure is inherent to the persistence model -->
+  <Match>
+    <Class name="~com\.hms\.entity\..*"/>
+    <Bug pattern="EI_EXPOSE_REP,EI_EXPOSE_REP2,SE_NO_SERIALVERSIONID"/>
+  </Match>
+
+  <!-- DTOs: same as entities -->
+  <Match>
+    <Class name="~com\.hms\.dto\..*"/>
+    <Bug pattern="EI_EXPOSE_REP,EI_EXPOSE_REP2"/>
+  </Match>
+
+  <!-- Tests -->
+  <Match>
+    <Class name="~.*Test(s)?$"/>
+  </Match>
+
+  <!-- Spring @Autowired field injection (framework pattern, not a real bug) -->
+  <Match>
+    <Bug pattern="URF_UNREAD_PUBLIC_OR_PROTECTED_FIELD"/>
+  </Match>
+</FindBugsFilter>

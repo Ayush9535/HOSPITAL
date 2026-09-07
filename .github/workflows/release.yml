@@ -1,0 +1,189 @@
+name: Release
+
+# Enterprise release engineering: build immutable, versioned, checksummed artifacts and PREPARE
+# a GitHub Release (as a draft) with auto-generated notes. It never deploys — deployment keys off
+# branch refs in ci.yml and is untouched here. A human publishes the draft when ready.
+#
+#   • Push a tag `vX.Y.Z[-pre]`  → builds artifacts + creates a DRAFT GitHub Release.
+#   • Run manually (workflow_dispatch) → builds + uploads artifacts only (dry run, no Release).
+#
+# See docs/release/RELEASE_ENGINEERING.md.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to build (e.g. 1.2.0 or 1.2.0-rc.1). Dry run — no Release is created.'
+        required: true
+        type: string
+
+# Least privilege: creating a Release + uploading assets needs contents: write. Nothing else.
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build & prepare release
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      # Pin to SHA in production: https://github.com/actions/checkout/releases
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history + tags for release notes and git metadata
+
+      - name: Derive version & channel
+        id: ver
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            RAW="${{ inputs.version }}"
+          else
+            RAW="${GITHUB_REF_NAME}" # the pushed tag, e.g. v1.2.0
+          fi
+          bash scripts/derive-version.sh "$RAW" | tee -a "$GITHUB_OUTPUT"
+
+      - name: Setup Java
+        uses: ./.github/actions/setup-java
+        with:
+          java-version: ${{ vars.JAVA_VERSION || '17' }}
+
+      - name: Setup Node.js
+        uses: ./.github/actions/setup-node
+        with:
+          node-version: ${{ vars.NODE_VERSION || '22' }}
+          working-directory: frontend
+
+      # ── Backend: stamp version, build immutable JAR (embeds build-info + git.properties) ──
+      - name: Set backend version
+        run: >
+          mvn -q -B -f backend/pom.xml versions:set
+          -DnewVersion=${{ steps.ver.outputs.version }}
+          -DgenerateBackupPoms=false
+          --no-transfer-progress
+
+      - name: Build backend JAR
+        run: mvn -q -B -f backend/pom.xml package -DskipTests --no-transfer-progress
+
+      # ── Frontend: production build (bakes the production API URL, same as ci.yml main) ──
+      - name: Build frontend
+        working-directory: frontend
+        env:
+          VITE_API_BASE_URL: ${{ vars.PROD_API_BASE_URL }}
+        run: npx vite build
+
+      # ── Assemble immutable, version-named artifacts ─────────────────────────
+      - name: Assemble artifacts
+        env:
+          RELEASE_VERSION: ${{ steps.ver.outputs.version }}
+          BUILD_ENV: release
+        run: |
+          set -euo pipefail
+          VER='${{ steps.ver.outputs.version }}'
+          mkdir -p release
+
+          # Backend executable JAR (there is exactly one non-plain jar).
+          JAR=$(find backend/target -maxdepth 1 -name 'hospital-management-system-*.jar' ! -name '*-plain.jar' | head -n1)
+          cp "$JAR" "release/hms-backend-$VER.jar"
+
+          # Frontend: stamp version.json into dist, then zip the production assets.
+          bash scripts/generate-build-metadata.sh > frontend/dist/version.json
+          (cd frontend && zip -qr "../release/hms-frontend-$VER.zip" dist)
+
+          # SBOM (produced by the Phase-6 CycloneDX plugin during `package`).
+          if [ -f backend/target/bom.json ]; then
+            cp backend/target/bom.json "release/hms-backend-sbom-$VER.cdx.json" || true
+          fi
+
+          # Machine-readable build metadata.
+          bash scripts/generate-build-metadata.sh > release/build-metadata.json
+
+          echo "Assembled:"; ls -la release
+
+      - name: Generate checksums (SHA-256 + SHA-512)
+        working-directory: release
+        run: bash ../scripts/generate-checksums.sh
+
+      # ── Prepare release notes (categorised from .github/release.yml + build metadata) ──
+      - name: Prepare release notes
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG='${{ steps.ver.outputs.tag }}'
+          gh api --method POST "repos/${{ github.repository }}/releases/generate-notes" \
+            -f tag_name="$TAG" -q '.body' > generated-notes.md \
+            || echo "_Auto-generated notes unavailable._" > generated-notes.md
+          {
+            echo "## HMS $TAG"
+            echo ""
+            echo "| Field | Value |"
+            echo "| --- | --- |"
+            echo "| Version | \`${{ steps.ver.outputs.version }}\` |"
+            echo "| Channel | ${{ steps.ver.outputs.channel }} |"
+            echo "| Commit | \`${{ github.sha }}\` |"
+            echo "| Build | [run #${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) |"
+            echo "| Built (UTC) | $(date -u +%Y-%m-%dT%H:%M:%SZ) |"
+            echo ""
+            echo "### Assets"
+            echo "- \`hms-backend-${{ steps.ver.outputs.version }}.jar\` — executable Spring Boot JAR"
+            echo "- \`hms-frontend-${{ steps.ver.outputs.version }}.zip\` — production web assets"
+            echo "- \`hms-backend-sbom-${{ steps.ver.outputs.version }}.cdx.json\` — CycloneDX SBOM"
+            echo "- \`build-metadata.json\`, \`SHA256SUMS\`, \`SHA512SUMS\`"
+            echo ""
+            echo "**Verify before deploying:** \`sha256sum -c SHA256SUMS\`. Do not deploy unverified artifacts."
+            echo ""
+            echo "---"
+            echo ""
+            cat generated-notes.md
+          } > release-notes.md
+
+      - name: Create draft GitHub Release
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # DRAFT so nothing is published/deployed automatically — a human reviews and publishes.
+          args=(--draft --notes-file release-notes.md --title "HMS ${{ steps.ver.outputs.tag }}")
+          if [ "${{ steps.ver.outputs.is_prerelease }}" = "true" ]; then
+            args+=(--prerelease)
+          fi
+          gh release create "${{ steps.ver.outputs.tag }}" "${args[@]}" release/*
+
+      - name: Upload build artifacts (always — also the dry-run output)
+        if: always()
+        # Pin to SHA in production: https://github.com/actions/upload-artifact/releases
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ steps.ver.outputs.version }}
+          path: release/
+          retention-days: 90
+          if-no-files-found: warn
+
+      - name: Release summary
+        if: always()
+        run: |
+          {
+            echo "## 📦 Release — ${{ steps.ver.outputs.tag }}"
+            echo ""
+            echo "| Field | Value |"
+            echo "| --- | --- |"
+            echo "| Version | \`${{ steps.ver.outputs.version }}\` |"
+            echo "| Channel | ${{ steps.ver.outputs.channel }} (prerelease: ${{ steps.ver.outputs.is_prerelease }}) |"
+            echo "| Mode | ${{ github.event_name == 'push' && 'Draft GitHub Release created' || 'Dry run (artifacts only)' }} |"
+            echo ""
+            echo "### Checksums (SHA-256)"
+            echo '```'
+            cat release/SHA256SUMS
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

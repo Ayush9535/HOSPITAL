@@ -1,0 +1,125 @@
+name: Build Frontend
+
+on:
+  workflow_call:
+    inputs:
+      node-version:
+        type: string
+        default: '22'
+      vite-api-base-url:
+        type: string
+        default: ''
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: frontend
+
+    steps:
+      # Pin to SHA in production: https://github.com/actions/checkout/releases
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: ./.github/actions/setup-node
+        with:
+          node-version: ${{ inputs.node-version }}
+          working-directory: frontend
+
+      - name: TypeScript type check
+        run: npx tsc --noEmit
+
+      - name: Vite build
+        env:
+          VITE_API_BASE_URL: ${{ inputs.vite-api-base-url }}
+        run: npx vite build
+
+      # Stamp build metadata into the bundle so the running site can report its exact build
+      # (fetch /version.json). Mirrors the backend's /actuator/info. See docs/release/.
+      - name: Write frontend build metadata (dist/version.json)
+        env:
+          BUILD_ENV: ci
+        run: bash ../scripts/generate-build-metadata.sh > dist/version.json
+
+      - name: Install Vitest coverage if needed
+        run: |
+          if ! node -e "require('@vitest/coverage-v8')" 2>/dev/null; then
+            npm install --no-save vitest @vitest/coverage-v8
+          fi
+
+      - name: Run tests with coverage
+        continue-on-error: true
+        run: >
+          npx vitest run
+          --coverage
+          --coverage.provider v8
+          --coverage.reporter lcovonly
+          --coverage.reporter json-summary
+          --passWithNoTests
+          --reporter verbose
+
+      - name: Write coverage summary
+        if: always()
+        run: |
+          python3 - <<'EOF'
+          import json, os, sys
+
+          summary_path = "coverage/coverage-summary.json"
+          step_summary = os.environ.get("GITHUB_STEP_SUMMARY", "/dev/null")
+
+          if not os.path.exists(summary_path):
+              with open(step_summary, "a") as f:
+                  f.write("## Frontend Coverage\n\nNo tests found.\n")
+              sys.exit(0)
+
+          with open(summary_path) as f:
+              data = json.load(f)
+
+          total = data.get("total", {})
+
+          def pct(key):
+              v = total.get(key, {})
+              val = v.get('pct', 0)
+              try:
+                  return f"{float(val):.1f}%"
+              except (ValueError, TypeError):
+                  return f"{val}"
+
+          table = (
+              "## Frontend Coverage\n\n"
+              "| Metric | Coverage |\n"
+              "| --- | --- |\n"
+              f"| Statements | {pct('statements')} |\n"
+              f"| Branches   | {pct('branches')} |\n"
+              f"| Functions  | {pct('functions')} |\n"
+              f"| Lines      | {pct('lines')} |\n"
+          )
+
+          with open(step_summary, "a") as f:
+              f.write(table)
+          EOF
+
+      - name: Upload coverage artifact
+        if: always()
+        # Pin to SHA in production: https://github.com/actions/upload-artifact/releases
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-coverage-${{ github.sha }}
+          path: |
+            frontend/coverage/lcov.info
+            frontend/coverage/coverage-summary.json
+          retention-days: 7
+          if-no-files-found: warn
+
+      - name: Upload dist artifact
+        # Pin to SHA in production: https://github.com/actions/upload-artifact/releases
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist-${{ github.sha }}
+          path: frontend/dist/
+          retention-days: 7
+          if-no-files-found: error

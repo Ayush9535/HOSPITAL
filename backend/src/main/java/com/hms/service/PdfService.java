@@ -1,265 +1,135 @@
 package com.hms.service;
 
 import com.hms.entity.*;
-import com.lowagie.text.*;
-import com.lowagie.text.pdf.PdfPCell;
-import com.lowagie.text.pdf.PdfPTable;
-import com.lowagie.text.pdf.PdfWriter;
+import com.hms.entity.pharmacy.PharmacySale;
+import com.hms.service.pdf.BillingPdfService;
+import com.hms.service.pdf.ClinicalPdfService;
+import com.hms.service.pdf.ReportPdfService;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
 import java.io.ByteArrayInputStream;
-import java.io.ByteArrayOutputStream;
-import java.time.format.DateTimeFormatter;
 import java.util.List;
 
+/**
+ * @deprecated Use the focused services in com.hms.service.pdf:
+ *   {@link BillingPdfService}, {@link ClinicalPdfService}, {@link ReportPdfService}.
+ *   This facade exists only for backward compatibility with existing controllers.
+ */
+@Deprecated
 @Service
 public class PdfService {
 
-        public ByteArrayInputStream generatePrescriptionPdf(
-                        Hospital hospital,
-                        Doctor doctor,
-                        Patient patient,
-                        MedicalRecord medicalRecord,
-                        List<Prescription> prescriptions) {
+    @Autowired
+    private BillingPdfService billingPdfService;
 
-                Document document = new Document(PageSize.A4);
-                ByteArrayOutputStream out = new ByteArrayOutputStream();
+    @Autowired
+    private ClinicalPdfService clinicalPdfService;
 
-                try {
-                        PdfWriter.getInstance(document, out);
-                        document.open();
+    @Autowired
+    private ReportPdfService reportPdfService;
 
-                        // Fonts
-                        Font headerFont = FontFactory.getFont(FontFactory.HELVETICA_BOLD, 18, Font.BOLD,
-                                        java.awt.Color.BLACK);
-                        Font subHeaderFont = FontFactory.getFont(FontFactory.HELVETICA_BOLD, 12, Font.BOLD,
-                                        java.awt.Color.DARK_GRAY);
-                        Font normalFont = FontFactory.getFont(FontFactory.HELVETICA, 10, Font.NORMAL,
-                                        java.awt.Color.BLACK);
-                        Font smallFont = FontFactory.getFont(FontFactory.HELVETICA, 8, Font.NORMAL,
-                                        java.awt.Color.GRAY);
-
-                        // --- Header: Hospital Info ---
-                        Paragraph hospitalName = new Paragraph(hospital.getName(), headerFont);
-                        hospitalName.setAlignment(Element.ALIGN_CENTER);
-                        document.add(hospitalName);
-
-                        Paragraph hospitalAddress = new Paragraph(
-                                        "Clinic Address: " + (hospital.getAddress() != null ? hospital.getAddress()
-                                                        : "N/A"),
-                                        smallFont);
-                        hospitalAddress.setAlignment(Element.ALIGN_CENTER);
-                        document.add(hospitalAddress);
-
-                        Paragraph hospitalContact = new Paragraph(
-                                        "Contact: " + (hospital.getPhone() != null ? hospital.getPhone() : "N/A"),
-                                        smallFont);
-                        hospitalContact.setAlignment(Element.ALIGN_CENTER);
-                        document.add(hospitalContact);
-
-                        document.add(new Paragraph("\n"));
-                        document.add(new Paragraph("PRESCRIPTION", subHeaderFont)); // Make this
-                                                                                    // centered?
-                        document.add(new Paragraph(
-                                        "----------------------------------------------------------------------------------------------------------------"));
-
-                        // --- Doctor & Patient Info Table ---
-                        PdfPTable infoTable = new PdfPTable(2);
-                        infoTable.setWidthPercentage(100);
-                        infoTable.setWidths(new int[] { 1, 1 });
-
-                        // Doctor Details (Left)
-                        PdfPCell doctorCell = new PdfPCell();
-                        doctorCell.setBorder(Rectangle.NO_BORDER);
-                        doctorCell.addElement(new Paragraph("Dr. " + doctor.getName(), subHeaderFont));
-                        doctorCell.addElement(new Paragraph(doctor.getSpecialization(), normalFont));
-                        doctorCell.addElement(new Paragraph("Phone: " + doctor.getPhone(), normalFont));
-                        infoTable.addCell(doctorCell);
-
-                        // Patient Details (Right)
-                        PdfPCell patientCell = new PdfPCell();
-                        patientCell.setBorder(Rectangle.NO_BORDER);
-                        patientCell.addElement(new Paragraph("Patient: " + patient.getName(), normalFont));
-                        patientCell.addElement(
-                                        new Paragraph("Age/Gender: " + patient.getAge() + " / " + patient.getGender(),
-                                                        normalFont));
-                        patientCell.addElement(new Paragraph(
-                                        "Date: " + medicalRecord.getCreatedAt()
-                                                        .format(DateTimeFormatter.ofPattern("dd-MM-yyyy")),
-                                        normalFont));
-                        patientCell.addElement(new Paragraph("ID: " + patient.getCustomId(), normalFont));
-                        infoTable.addCell(patientCell);
-
-                        document.add(infoTable);
-                        document.add(new Paragraph(
-                                        "----------------------------------------------------------------------------------------------------------------"));
-                        document.add(new Paragraph("\n"));
-
-                        // --- Vitals / Diagnosis ---
-                        if (medicalRecord.getSymptoms() != null && !medicalRecord.getSymptoms().isEmpty()) {
-                                document.add(new Paragraph("Symptoms: " + medicalRecord.getSymptoms(), normalFont));
-                        }
-                        if (medicalRecord.getDiagnosis() != null && !medicalRecord.getDiagnosis().isEmpty()) {
-                                document.add(new Paragraph("Diagnosis: " + medicalRecord.getDiagnosis(), normalFont));
-                        }
-                        if (medicalRecord.getTreatmentNotes() != null && !medicalRecord.getTreatmentNotes().isEmpty()) {
-                                document.add(new Paragraph("Notes: " + medicalRecord.getTreatmentNotes(), normalFont));
-                        }
-                        document.add(new Paragraph("\n"));
-
-                        // --- Rx Table ---
-                        if (prescriptions != null && !prescriptions.isEmpty()) {
-                                PdfPTable table = new PdfPTable(5);
-                                table.setWidthPercentage(100);
-                                table.setWidths(new int[] { 3, 1, 1, 1, 3 });
-                                table.setHeaderRows(1);
-
-                                // Headers
-                                table.addCell(new PdfPCell(new Paragraph("Medicine", subHeaderFont)));
-                                table.addCell(new PdfPCell(new Paragraph("Dosage", subHeaderFont)));
-                                table.addCell(new PdfPCell(new Paragraph("Freq", subHeaderFont)));
-                                table.addCell(new PdfPCell(new Paragraph("Duration", subHeaderFont)));
-                                table.addCell(new PdfPCell(new Paragraph("Instruction", subHeaderFont)));
-
-                                // Rows
-                                for (Prescription p : prescriptions) {
-                                        table.addCell(new Paragraph(p.getMedicineName(), normalFont));
-                                        table.addCell(new Paragraph(p.getDosage(), normalFont));
-                                        table.addCell(new Paragraph(p.getFrequency(), normalFont));
-                                        table.addCell(new Paragraph(p.getDuration(), normalFont));
-                                        table.addCell(new Paragraph(p.getInstructions(), normalFont));
-                                }
-
-                                document.add(table);
-                        } else {
-                                document.add(new Paragraph("No medicines prescribed.", normalFont));
-                        }
-
-                        document.add(new Paragraph("\n"));
-
-                        // --- Follow Up ---
-                        if (medicalRecord.getFollowUpDate() != null) {
-                                document.add(new Paragraph(
-                                                "Follow-up Date: "
-                                                                + medicalRecord.getFollowUpDate()
-                                                                                .format(DateTimeFormatter.ofPattern(
-                                                                                                "dd-MM-yyyy")),
-                                                subHeaderFont));
-                        }
-
-                        // --- Footer ---
-                        document.add(new Paragraph("\n\n\n\n"));
-                        Paragraph signature = new Paragraph("(Doctor's Signature)", smallFont);
-                        signature.setAlignment(Element.ALIGN_RIGHT);
-                        document.add(signature);
-
-                        document.close();
-
-                } catch (DocumentException e) {
-                        throw new RuntimeException("Error generating PDF", e);
+    /**
+     * Merge several PDFs into one, page after page. Used to print the consultation documents
+     * (case paper, bill, prescription) as a single multi-page job — a single print dialog is
+     * reliable, whereas firing one dialog per document is not. Null/empty inputs are skipped.
+     */
+    public ByteArrayInputStream mergePdfs(List<byte[]> pdfs) {
+        com.lowagie.text.Document document = new com.lowagie.text.Document();
+        java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+        try {
+            com.lowagie.text.pdf.PdfCopy copy = new com.lowagie.text.pdf.PdfCopy(document, out);
+            document.open();
+            for (byte[] pdf : pdfs) {
+                if (pdf == null || pdf.length == 0) continue;
+                com.lowagie.text.pdf.PdfReader reader = new com.lowagie.text.pdf.PdfReader(pdf);
+                for (int i = 1; i <= reader.getNumberOfPages(); i++) {
+                    copy.addPage(copy.getImportedPage(reader, i));
                 }
-
-                return new ByteArrayInputStream(out.toByteArray());
+                copy.freeReader(reader);
+                reader.close();
+            }
+            document.close();
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to merge PDFs", e);
         }
+        return new ByteArrayInputStream(out.toByteArray());
+    }
 
-        public ByteArrayInputStream generateBillingReceiptPdf(Hospital hospital, Patient patient, Billing billing) {
-                Document document = new Document(PageSize.A5.rotate()); // A5 Landscape for receipts
-                ByteArrayOutputStream out = new ByteArrayOutputStream();
+    public ByteArrayInputStream generatePrescriptionPdf(
+            Hospital hospital,
+            Doctor doctor,
+            Patient patient,
+            MedicalRecord medicalRecord,
+            List<Prescription> prescriptions) {
+        return clinicalPdfService.generatePrescriptionPdf(hospital, doctor, patient, medicalRecord, prescriptions);
+    }
 
-                try {
-                        PdfWriter.getInstance(document, out);
-                        document.open();
+    public ByteArrayInputStream generateBillingReceiptPdf(Hospital hospital, Patient patient, Billing billing) {
+        return billingPdfService.generateBillingReceiptPdf(hospital, patient, billing);
+    }
 
-                        // Fonts
-                        Font headerFont = FontFactory.getFont(FontFactory.HELVETICA_BOLD, 16, Font.BOLD,
-                                        java.awt.Color.BLACK);
-                        Font subHeaderFont = FontFactory.getFont(FontFactory.HELVETICA_BOLD, 12, Font.BOLD,
-                                        java.awt.Color.DARK_GRAY);
-                        Font normalFont = FontFactory.getFont(FontFactory.HELVETICA, 10, Font.NORMAL,
-                                        java.awt.Color.BLACK);
-                        Font smallFont = FontFactory.getFont(FontFactory.HELVETICA, 8, Font.NORMAL,
-                                        java.awt.Color.GRAY);
+    public ByteArrayInputStream generatePharmacySaleReceiptPdf(Hospital hospital, Patient patient, PharmacySale sale) {
+        return billingPdfService.generatePharmacySaleReceiptPdf(hospital, patient, sale);
+    }
 
-                        // --- Header: Hospital Info ---
-                        Paragraph hospitalName = new Paragraph(hospital.getName(), headerFont);
-                        hospitalName.setAlignment(Element.ALIGN_CENTER);
-                        document.add(hospitalName);
+    public ByteArrayInputStream generateMedicinesListPdf(
+            Hospital hospital,
+            Doctor doctor,
+            Patient patient,
+            String title,
+            String customNo,
+            java.time.LocalDateTime createdAt,
+            List<String[]> itemsList) {
+        return reportPdfService.generateMedicinesListPdf(hospital, doctor, patient, title, customNo, createdAt, itemsList);
+    }
 
-                        Paragraph hospitalAddress = new Paragraph(
-                                        "Clinic Address: " + (hospital.getAddress() != null ? hospital.getAddress()
-                                                        : "N/A"),
-                                        smallFont);
-                        hospitalAddress.setAlignment(Element.ALIGN_CENTER);
-                        document.add(hospitalAddress);
+    public ByteArrayInputStream generateIpdPrescriptionPdf(
+            Hospital hospital,
+            Patient patient,
+            IpdAdmission ipd,
+            List<Prescription> prescriptions) {
+        return clinicalPdfService.generateIpdPrescriptionPdf(hospital, patient, ipd, prescriptions);
+    }
 
-                        document.add(new Paragraph("\n"));
-                        Paragraph title = new Paragraph("PAYMENT RECEIPT", subHeaderFont);
-                        title.setAlignment(Element.ALIGN_CENTER);
-                        document.add(title);
-                        document.add(new Paragraph(
-                                        "------------------------------------------------------------------------------------------------",
-                                        normalFont));
+    public ByteArrayInputStream generatePatientActivityPdf(
+            Hospital hospital,
+            java.time.LocalDate date,
+            java.util.List<java.util.Map<String, Object>> activities) {
+        return reportPdfService.generatePatientActivityPdf(hospital, date, activities);
+    }
 
-                        // --- Receipt Details ---
-                        PdfPTable table = new PdfPTable(2);
-                        table.setWidthPercentage(100);
+    public ByteArrayInputStream generateCasePaperPdf(
+            Hospital hospital,
+            Doctor doctor,
+            Patient patient,
+            Opd opd,
+            MedicalRecord medicalRecord) {
+        return generateCasePaperPdf(hospital, doctor, patient, opd, medicalRecord, java.util.List.of());
+    }
 
-                        PdfPCell cell = new PdfPCell();
-                        cell.setBorder(Rectangle.NO_BORDER);
-                        cell.addElement(new Paragraph("Receipt No: " + billing.getCustomId(), normalFont));
-                        cell.addElement(new Paragraph(
-                                        "Date: " + billing.getCreatedAt()
-                                                        .format(DateTimeFormatter.ofPattern("dd-MM-yyyy HH:mm")),
-                                        normalFont));
-                        table.addCell(cell);
+    public ByteArrayInputStream generateCasePaperPdf(
+            Hospital hospital,
+            Doctor doctor,
+            Patient patient,
+            Opd opd,
+            MedicalRecord medicalRecord,
+            List<com.hms.entity.LabOrder> labOrders) {
+        return clinicalPdfService.generateCasePaperPdf(hospital, doctor, patient, opd, medicalRecord, labOrders);
+    }
 
-                        cell = new PdfPCell();
-                        cell.setBorder(Rectangle.NO_BORDER);
-                        cell.addElement(new Paragraph("Patient: " + patient.getName(), normalFont));
-                        cell.addElement(new Paragraph("Patient ID: " + patient.getCustomId(), normalFont));
-                        table.addCell(cell);
+    public ByteArrayInputStream generatePatientsReportPdf(
+            Hospital hospital,
+            java.time.LocalDate date,
+            java.util.List<Patient> patients) {
+        return reportPdfService.generatePatientsReportPdf(hospital, date, patients);
+    }
 
-                        document.add(table);
-                        document.add(new Paragraph(
-                                        "------------------------------------------------------------------------------------------------",
-                                        normalFont));
-                        document.add(new Paragraph("\n"));
-
-                        // --- Amount ---
-                        PdfPTable amountTable = new PdfPTable(2);
-                        amountTable.setWidthPercentage(100);
-                        amountTable.setWidths(new int[] { 3, 1 });
-
-                        amountTable.addCell(new Paragraph("Description", subHeaderFont));
-                        amountTable.addCell(new Paragraph("Amount (INR)", subHeaderFont));
-
-                        amountTable.addCell(new Paragraph(billing.getDescription(), normalFont));
-                        amountTable.addCell(new Paragraph(billing.getAmount().toString(), normalFont));
-
-                        document.add(amountTable);
-
-                        document.add(new Paragraph("\n"));
-                        Paragraph total = new Paragraph("Total Paid: INR " + billing.getAmount().toString(),
-                                        subHeaderFont);
-                        total.setAlignment(Element.ALIGN_RIGHT);
-                        document.add(total);
-
-                        Paragraph status = new Paragraph("Status: " + billing.getPaymentStatus(), smallFont);
-                        status.setAlignment(Element.ALIGN_RIGHT);
-                        document.add(status);
-
-                        // --- Footer ---
-                        document.add(new Paragraph("\n\n"));
-                        Paragraph signature = new Paragraph("(Authorized Signature)", smallFont);
-                        signature.setAlignment(Element.ALIGN_RIGHT);
-                        document.add(signature);
-
-                        document.close();
-
-                } catch (DocumentException e) {
-                        throw new RuntimeException("Error generating PDF", e);
-                }
-
-                return new ByteArrayInputStream(out.toByteArray());
-        }
+    public ByteArrayInputStream generateOpdReportPdf(
+            Hospital hospital,
+            java.time.LocalDate date,
+            java.util.List<Opd> opds,
+            String reportType) {
+        return reportPdfService.generateOpdReportPdf(hospital, date, opds, reportType);
+    }
 }

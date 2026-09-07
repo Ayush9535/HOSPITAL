@@ -3,6 +3,7 @@ package com.hms.service.platform;
 import com.hms.dto.UserSummaryDTO;
 import com.hms.entity.User;
 import com.hms.entity.AuditLog;
+import com.hms.exception.ResourceNotFoundException;
 import com.hms.repository.UserRepository;
 import com.hms.repository.AuditLogRepository;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -12,6 +13,8 @@ import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.security.core.context.SecurityContextHolder;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import java.util.Map;
 import java.util.HashMap;
 
@@ -23,6 +26,8 @@ import java.util.HashMap;
 @Service
 public class PlatformUserService {
 
+    private static final Logger logger = LoggerFactory.getLogger(PlatformUserService.class);
+
     @Autowired
     private UserRepository userRepository;
     @Autowired
@@ -31,11 +36,6 @@ public class PlatformUserService {
     private PasswordEncoder passwordEncoder;
 
     public Page<UserSummaryDTO> getAllUsers(String role, String hospitalId, String search, Pageable pageable) {
-        // Enforce Strict SaaS Architecture: Super Admin only sees Hospital Admins
-        // We ignore the requested role and force HOSPITAL_ADMIN
-        // DEBUG LOG
-        System.out
-                .println("PLATFORM USER SERVICE: filtering users with hospitalId=" + hospitalId + ", search=" + search);
         return userRepository.findAllSummary("HOSPITAL_ADMIN", hospitalId, search, pageable);
     }
 
@@ -64,7 +64,7 @@ public class PlatformUserService {
         }
 
         if (user == null) {
-            throw new RuntimeException("User not found with ID: " + idStr);
+            throw new ResourceNotFoundException("User not found with ID: " + idStr);
         }
 
         String newPassword = java.util.UUID.randomUUID().toString().substring(0, 8);
@@ -88,12 +88,8 @@ public class PlatformUserService {
             log.setPerformedBy(currentUsername);
             auditLogRepository.save(log);
         } catch (Exception e) {
-            System.err.println("Failed to save audit log: " + e.getMessage());
+            logger.error("Failed to save audit log: {}", e.getMessage(), e);
         }
     }
 
-    // DEBUG ONLY
-    public java.util.List<User> debugGetAllUsers() {
-        return userRepository.findAll();
-    }
 }

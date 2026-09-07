@@ -1,0 +1,68 @@
+# Prometheus alerting rules for HMS (application-level).
+# Load via prometheus.yml `rule_files:`. Route through Alertmanager to Slack/email/on-call.
+# Metrics come from /actuator/prometheus (Micrometer). See docs/monitoring/OBSERVABILITY.md.
+groups:
+  - name: hms-availability
+    rules:
+      - alert: HMSInstanceDown
+        expr: up{job="hms-backend"} == 0
+        for: 1m
+        labels: { severity: critical }
+        annotations:
+          summary: "HMS backend is DOWN ({{ $labels.environment }})"
+          description: "Prometheus cannot scrape {{ $labels.instance }} for >1m. Patient-facing outage likely."
+
+      - alert: HMSHighErrorRate
+        # >5% of requests are 5xx over 5m.
+        expr: |
+          sum(rate(http_server_requests_seconds_count{job="hms-backend",status=~"5.."}[5m]))
+          / sum(rate(http_server_requests_seconds_count{job="hms-backend"}[5m])) > 0.05
+        for: 5m
+        labels: { severity: critical }
+        annotations:
+          summary: "HMS 5xx error rate >5% ({{ $labels.environment }})"
+          description: "Server errors elevated for 5m — investigate logs and recent deploys."
+
+  - name: hms-latency
+    rules:
+      - alert: HMSHighLatencyP95
+        # p95 request latency > 1s for 10m.
+        expr: |
+          histogram_quantile(0.95,
+            sum(rate(http_server_requests_seconds_bucket{job="hms-backend"}[5m])) by (le)) > 1
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "HMS p95 latency >1s ({{ $labels.environment }})"
+          description: "95th-percentile request latency degraded for 10m."
+
+  - name: hms-resources
+    rules:
+      - alert: HMSHighHeapUsage
+        expr: |
+          sum(jvm_memory_used_bytes{job="hms-backend",area="heap"})
+          / sum(jvm_memory_max_bytes{job="hms-backend",area="heap"}) > 0.9
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "HMS JVM heap >90% ({{ $labels.environment }})"
+          description: "Heap sustained above 90% — risk of GC thrash / OOM."
+
+      - alert: HMSDBPoolNearExhaustion
+        expr: |
+          sum(hikaricp_connections_active{job="hms-backend"})
+          / sum(hikaricp_connections_max{job="hms-backend"}) > 0.9
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "HMS DB connection pool >90% used ({{ $labels.environment }})"
+          description: "HikariCP near exhaustion — slow queries or a connection leak."
+
+      - alert: HMSDBDown
+        # Micrometer publishes the DB health indicator as a gauge (1=UP, 0=DOWN) when enabled.
+        expr: hikaricp_connections{job="hms-backend"} == 0
+        for: 2m
+        labels: { severity: critical }
+        annotations:
+          summary: "HMS database connectivity lost ({{ $labels.environment }})"
+          description: "No database connections available for >2m."

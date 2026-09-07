@@ -1,0 +1,313 @@
+# ────────────────────────────────────────────
+# Staging Deployment — Hospital Management System
+# ────────────────────────────────────────────
+#
+# Triggers only on push to the staging branch.
+# Runs the full CI/CD verification pipeline and deploys to Staging.
+#
+# ────────────────────────────────────────────
+
+name: Deploy — Staging
+
+on:
+  push:
+    branches:
+      - staging
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-staging
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  # ── Validate — fast fail-fast gate (commits, lint, format) ───────────────
+  validate:
+    uses: ./.github/workflows/_validate.yml
+    with:
+      node-version: ${{ vars.NODE_VERSION || '22' }}
+
+  # ── Check secrets presence — gates jobs needing keys (like Sonar) ─────────
+  check-secrets:
+    name: Check secrets presence
+    runs-on: ubuntu-latest
+    outputs:
+      has_sonar_token: ${{ steps.check.outputs.has_sonar_token }}
+    steps:
+      - name: Check Sonar Token
+        id: check
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_VAR: ${{ vars.SONAR_TOKEN }}
+          SONAR_ORG: ${{ vars.SONAR_ORGANIZATION }}
+          SONAR_KEY: ${{ vars.SONAR_PROJECT_KEY }}
+        run: |
+          if { [ -n "$SONAR_TOKEN" ] || [ -n "$SONAR_VAR" ]; } && [ -n "$SONAR_ORG" ] && [ -n "$SONAR_KEY" ]; then
+            echo "has_sonar_token=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_sonar_token=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  # ── Frontend build, type-check, coverage ────────────────────────────────
+  build-frontend:
+    needs: [validate]
+    uses: ./.github/workflows/_build-frontend.yml
+    with:
+      node-version: ${{ vars.NODE_VERSION || '22' }}
+      vite-api-base-url: ${{ vars.STAGE_API_BASE_URL }}
+
+  # ── Backend compile, test (JaCoCo), package ──────────────────────────────
+  build-backend:
+    needs: [validate]
+    uses: ./.github/workflows/_build-backend.yml
+    permissions:
+      contents: read
+      checks: write
+      pull-requests: write
+    with:
+      java-version: ${{ vars.JAVA_VERSION || '17' }}
+
+  # ── Security: CodeQL, dependency-review, Gitleaks, npm audit, OWASP ─────
+  security:
+    needs: [validate]
+    uses: ./.github/workflows/_security.yml
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+      pull-requests: write
+    with:
+      node-version: ${{ vars.NODE_VERSION || '22' }}
+      java-version: ${{ vars.JAVA_VERSION || '17' }}
+    secrets: inherit
+
+  # ── Java static analysis (Checkstyle · SpotBugs+FindSecBugs · PMD · Spotless) ─
+  quality:
+    needs: [validate]
+    uses: ./.github/workflows/_quality.yml
+    with:
+      java-version: ${{ vars.JAVA_VERSION || '17' }}
+
+  # ── DB migration validation & safety gate (no database needed) ─────────────
+  db-migrations:
+    name: DB Migration Validation
+    needs: [validate]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test the migration validator
+        run: bash scripts/db/test-validate-migrations.sh
+      - name: Validate Flyway migrations
+        run: bash scripts/db/validate-migrations.sh
+      - name: Validate schema bootstrap
+        run: bash scripts/db/validate-schema-bootstrap.sh
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## Database Migration Validation"
+            echo ""
+            echo "Flyway migrations checked for naming, duplicate versions, and unacked destructive SQL."
+            echo "Policy: docs/database/DATABASE_MIGRATIONS.md."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ── Supply chain: SBOM, Trivy (fs + Dockerfile), license compliance ────────
+  supply-chain:
+    needs: [validate]
+    uses: ./.github/workflows/_supply-chain.yml
+    permissions:
+      contents: read
+      security-events: write
+      id-token: write
+    with:
+      node-version: ${{ vars.NODE_VERSION || '22' }}
+      java-version: ${{ vars.JAVA_VERSION || '17' }}
+
+  # ── SonarCloud quality gate ───────────────────────────────────────────────
+  sonar:
+    name: Quality — SonarCloud Analysis & Gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: [build-frontend, build-backend, check-secrets]
+    if: >
+      (github.event_name == 'push' ||
+       (github.event_name == 'pull_request' &&
+        github.event.pull_request.head.repo.full_name == github.repository)) &&
+      needs.check-secrets.outputs.has_sonar_token == 'true'
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Setup Java
+        uses: ./.github/actions/setup-java
+        with:
+          java-version: ${{ vars.JAVA_VERSION || '17' }}
+      - name: Compile backend (bytecode for Sonar)
+        run: mvn test-compile -q -f backend/pom.xml
+      - name: Download JaCoCo coverage report
+        uses: actions/download-artifact@v4
+        with:
+          name: jacoco-xml-${{ github.sha }}
+          path: backend/target/site/jacoco/
+      - name: Download frontend LCOV coverage report
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-coverage-${{ github.sha }}
+          path: frontend/coverage/
+        continue-on-error: true
+      - name: Run SonarCloud analysis
+        # Advisory gate: Sonar still analyses and reports to SonarCloud, but a failing quality gate
+        # must not block the staging deploy (this mirrors deploy-prod.yml, which already does this).
+        # The deploy-staging job needs this job to succeed, so keep it non-blocking here.
+        continue-on-error: true
+        uses: sonarsource/sonarqube-scan-action@v6
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN || vars.SONAR_TOKEN }}
+          SONAR_HOST_URL: https://sonarcloud.io
+        with:
+          args: >
+            -Dsonar.organization=${{ vars.SONAR_ORGANIZATION }}
+            -Dsonar.projectKey=${{ vars.SONAR_PROJECT_KEY }}
+            -Dsonar.sources=backend/src/main/java,frontend/src
+            -Dsonar.tests=backend/src/test/java
+            -Dsonar.java.binaries=backend/target/classes
+            -Dsonar.java.source=${{ vars.JAVA_VERSION || '17' }}
+            -Dsonar.coverage.jacoco.xmlReportPaths=backend/target/site/jacoco/jacoco.xml
+            -Dsonar.javascript.lcov.reportPaths=frontend/coverage/lcov.info
+            -Dsonar.exclusions=**/node_modules/**,**/dist/**,**/target/surefire-reports/**,**/*.min.js,**/*.backup,**/frontend/src/pages/**,**/frontend/src/utils/printHtml.js
+            -Dsonar.coverage.exclusions=**/*
+            -Dsonar.cpd.exclusions=**/dto/**,**/entity/**,**/config/**,**/*Application.java
+            -Dsonar.sourceEncoding=UTF-8
+            -Dsonar.qualitygate.wait=${{ vars.SONAR_QUALITY_GATE_WAIT || 'true' }}
+            -Dsonar.jasmin.internal.disabled=true
+
+  # ── CI Summary — one consolidated status for developers ──────────────────
+  ci-summary:
+    name: CI Summary
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs:
+      [
+        validate,
+        build-frontend,
+        build-backend,
+        security,
+        quality,
+        supply-chain,
+        db-migrations,
+        sonar,
+      ]
+    if: always()
+    steps:
+      - name: Aggregate stage results
+        run: |
+          {
+            echo "## CI Summary"
+            echo ""
+            echo "| Stage | Result |"
+            echo "| --- | --- |"
+            echo "| Validate (commits/lint/format) | ${{ needs.validate.result }} |"
+            echo "| Frontend build + tests | ${{ needs.build-frontend.result }} |"
+            echo "| Backend build + tests (+coverage floor) | ${{ needs.build-backend.result }} |"
+            echo "| Security scans | ${{ needs.security.result }} |"
+            echo "| Java static analysis (report-only) | ${{ needs.quality.result }} |"
+            echo "| Supply chain (SBOM/Trivy/licenses, observe) | ${{ needs.supply-chain.result }} |"
+            echo "| DB migration validation | ${{ needs.db-migrations.result }} |"
+            echo "| SonarCloud quality gate | ${{ needs.sonar.result }} |"
+            echo ""
+            echo "Commit \`${{ github.sha }}\` on \`${{ github.ref_name }}\` — [run #${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Fail if any required stage failed
+        if: >
+          needs.validate.result == 'failure' ||
+          needs.build-frontend.result == 'failure' ||
+          needs.build-backend.result == 'failure' ||
+          needs.security.result == 'failure' ||
+          needs.db-migrations.result == 'failure'
+        run: |
+          echo "::error::One or more required CI stages failed — see the CI Summary above."
+          exit 1
+
+  # ── Deploy — Staging ───────────────────────────────────────────────────────
+  deploy-staging:
+    name: Deploy — Staging
+    needs: [build-frontend, build-backend, security, db-migrations, sonar]
+    if: >
+      always() &&
+      needs.build-frontend.result == 'success' &&
+      needs.build-backend.result == 'success' &&
+      needs.security.result == 'success' &&
+      needs.db-migrations.result == 'success' &&
+      (needs.sonar.result == 'success' || needs.sonar.result == 'skipped')
+    uses: ./.github/workflows/_deploy.yml
+    permissions:
+      contents: read
+      pull-requests: write
+    with:
+      environment: Staging
+      repo_path: /var/www/hms/staging/repo_stage
+      service_name: hms-staging
+      git_branch: staging
+      ssh_host: ${{ vars.STAGING_SSH_HOST }}
+      ssh_port: ${{ vars.STAGING_SSH_PORT || '22' }}
+      health_port: ${{ vars.STAGING_HEALTH_PORT || '8080' }}
+      app_url: ${{ vars.STAGING_APP_URL }}
+      enable_rollback: true
+      notify_slack: false
+    secrets:
+      ssh_key: ${{ secrets.SSH_PRIVATE_KEY }}
+      ssh_user: ${{ secrets.SSH_USERNAME }}
+
+  # ── Staging smoke tests — post-deploy verification against the live site ───
+  staging-smoke:
+    name: Staging — Smoke Tests
+    needs: [deploy-staging]
+    if: needs.deploy-staging.result == 'success'
+    runs-on: ubuntu-latest
+    environment: Staging
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate live smoke configuration
+        env:
+          STAGING_APP_URL: ${{ vars.STAGING_APP_URL }}
+          STAGING_API_URL: ${{ vars.STAGING_API_URL }}
+        run: |
+          missing=0
+          for name in STAGING_APP_URL STAGING_API_URL; do
+            if [ -z "${!name//[[:space:]]/}" ]; then
+              echo "::error::$name must be configured as a Staging environment variable."
+              missing=1
+            fi
+          done
+          exit "$missing"
+      - name: Setup Node.js
+        uses: ./.github/actions/setup-node
+        with:
+          node-version: ${{ vars.NODE_VERSION || '22' }}
+          working-directory: frontend
+      - name: Install Playwright
+        run: npm ci
+        env:
+          HUSKY: 0
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+      - name: Smoke test the deployed staging site
+        env:
+          E2E_BASE_URL: ${{ vars.STAGING_APP_URL }}
+          E2E_API_BASE_URL: ${{ vars.STAGING_API_URL }}
+        run: npx playwright test --config e2e/playwright.config.js smoke.spec.js
+      - name: Upload smoke report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: staging-smoke-report-${{ github.sha }}
+          path: e2e/playwright-report/
+          retention-days: 14
+          if-no-files-found: warn

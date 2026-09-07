@@ -1,0 +1,48 @@
+# ────────────────────────────────────────────
+# Database Migrations — Hospital Management System
+# ────────────────────────────────────────────
+
+name: DB Migrations
+
+on:
+  push:
+    branches-ignore:
+      - main
+      - staging
+    tags:
+      - 'v*'
+  pull_request:
+    branches:
+      - main
+      - staging
+  workflow_dispatch:
+
+concurrency:
+  group: db-migrations-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  db-migrations:
+    name: DB Migration Validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test the migration validator
+        run: bash scripts/db/test-validate-migrations.sh
+      - name: Validate Flyway migrations
+        run: bash scripts/db/validate-migrations.sh
+      - name: Validate schema bootstrap
+        run: bash scripts/db/validate-schema-bootstrap.sh
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## Database Migration Validation"
+            echo ""
+            echo "Flyway migrations checked for naming, duplicate versions, and unacked destructive SQL."
+            echo "Policy: docs/database/DATABASE_MIGRATIONS.md."
+          } >> "$GITHUB_STEP_SUMMARY"

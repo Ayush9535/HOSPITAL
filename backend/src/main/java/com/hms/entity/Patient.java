@@ -6,7 +6,9 @@ import lombok.Data;
 import lombok.NoArgsConstructor;
 import org.hibernate.annotations.CreationTimestamp;
 
+import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.Period;
 
 /**
  * Patient - Entity representing a patient in a hospital
@@ -53,10 +55,7 @@ public class Patient {
         if (this.publicId == null) {
             this.publicId = java.util.UUID.randomUUID().toString();
         }
-        if (this.customId == null) {
-            // Generate simple random readable ID: PAT + 4 random digits
-            this.customId = "PAT" + (1000 + new java.util.Random().nextInt(9000));
-        }
+        // customId is set by PatientService after save using the auto-increment id
     }
 
     /**
@@ -70,36 +69,65 @@ public class Patient {
      * Patient's full name
      */
     @Column(nullable = false, length = 100)
+    @jakarta.validation.constraints.NotBlank(message = "Name is required")
+    @jakarta.validation.constraints.Size(max = 100, message = "Name is too long")
+    @com.hms.validation.NoEmoji
     private String name;
 
     /**
-     * Patient's age
+     * Patient's date of birth. Nullable at the DB/entity level — not because
+     * it's optional, but to let Hibernate's ddl-auto=update add this column
+     * safely to a table that already has rows (a NOT NULL column with no
+     * default fails on populated tables in MySQL strict mode; this project
+     * already hit that exact failure twice with orphaned columns). "Always
+     * required" is enforced in PatientService.addPatient/updatePatient, the
+     * same way phone number already is.
      */
-    @Column(nullable = false)
-    private Integer age;
+    @Column(name = "date_of_birth")
+    private LocalDate dateOfBirth;
+
+    /**
+     * Computed, not stored — age changes every year, so storing it meant it
+     * silently went stale until someone manually corrected it. This getter
+     * makes age always correct with zero maintenance. Because Jackson (JSON)
+     * and Thymeleaf (PDF templates) both call getters via normal property
+     * access, every existing place that reads patient.getAge() / ${patient.age}
+     * keeps working unchanged, now receiving a live value instead of a stored one.
+     */
+    public Integer getAge() {
+        return dateOfBirth != null ? Period.between(dateOfBirth, LocalDate.now()).getYears() : null;
+    }
 
     /**
      * Patient's gender (MALE, FEMALE, OTHER)
      */
     @Column(nullable = false, length = 10)
+    @jakarta.validation.constraints.NotBlank(message = "Gender is required")
+    @jakarta.validation.constraints.Pattern(regexp = "^[A-Za-z \\-]{1,10}$", message = "Invalid gender")
     private String gender;
 
     /**
      * Patient's contact phone number
      */
     @Column(nullable = false, length = 15)
+    @jakarta.validation.constraints.NotBlank(message = "Phone number is required")
+    @jakarta.validation.constraints.Pattern(regexp = "^[0-9]{10}$", message = "Phone number must be exactly 10 digits")
     private String phone;
 
     /**
      * Patient's email address (optional)
      */
     @Column(length = 100)
+    @jakarta.validation.constraints.Email(message = "Invalid email format")
+    @jakarta.validation.constraints.Size(max = 100, message = "Email is too long")
     private String email;
 
     /**
      * Patient's address
      */
     @Column(length = 255)
+    @jakarta.validation.constraints.Size(max = 255, message = "Address is too long")
+    @com.hms.validation.NoEmoji
     private String address;
 
     /**
@@ -117,6 +145,8 @@ public class Patient {
      * Simplied text field for Phase 1
      */
     @Column(name = "medical_history", length = 1000)
+    @jakarta.validation.constraints.Size(max = 1000, message = "Medical history is too long")
+    @com.hms.validation.NoEmoji
     private String medicalHistory;
 
     /**

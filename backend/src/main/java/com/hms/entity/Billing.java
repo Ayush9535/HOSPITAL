@@ -49,6 +49,10 @@ public class Billing {
     @Column(name = "custom_id")
     private String customId;
 
+    // Reused SecureRandom for the numeric suffix of custom IDs (a single shared, non-predictable
+    // instance rather than a new java.util.Random() per call).
+    private static final java.security.SecureRandom CUSTOM_ID_RANDOM = new java.security.SecureRandom();
+
     @PrePersist
     public void generateIds() {
         if (this.publicId == null) {
@@ -56,7 +60,7 @@ public class Billing {
         }
         if (this.customId == null) {
             // Generate simple random readable ID: BIL + 4 random digits
-            this.customId = "BIL" + (1000 + new java.util.Random().nextInt(9000));
+            this.customId = "BIL" + (1000 + CUSTOM_ID_RANDOM.nextInt(9000));
         }
     }
 
@@ -105,10 +109,15 @@ public class Billing {
     private BigDecimal amount;
 
     /**
-     * Payment status (PAID, PENDING)
+     * Payment status: PENDING (nothing collected), PARTIAL (a balance is owed), PAID (ledger
+     * covers the total), CLOSED (written off / cancelled).
+     *
+     * Defaults to PENDING, never PAID: a bill must be paid for, not assumed paid. The old
+     * default of "PAID" meant any creator that forgot to set a status produced a silently free
+     * bill. It is normally derived from the payments ledger — see BillingService.recalculateTotal.
      */
     @Column(nullable = false, length = 20)
-    private String paymentStatus = "PAID";
+    private String paymentStatus = "PENDING";
 
     /**
      * Payment Method (Cash, Online, Card, etc.)
@@ -127,6 +136,9 @@ public class Billing {
      */
     @Column(length = 500)
     private String description;
+
+    @Column(name = "marked_paid_by", length = 100)
+    private String markedPaidBy;
 
     /**
      * Timestamp when the billing record was created

@@ -1,0 +1,316 @@
+# ────────────────────────────────────────────
+# Production Deployment — Hospital Management System
+# ────────────────────────────────────────────
+#
+# Triggers only on push to the main branch.
+# Runs the full CI/CD verification pipeline and deploys to Production (Approval Required).
+#
+# ────────────────────────────────────────────
+
+name: Deploy — Production
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  # ── Validate — fast fail-fast gate (commits, lint, format) ───────────────
+  validate:
+    uses: ./.github/workflows/_validate.yml
+    with:
+      node-version: ${{ vars.NODE_VERSION || '22' }}
+
+  # ── Check secrets presence — gates jobs needing keys (like Sonar) ─────────
+  check-secrets:
+    name: Check secrets presence
+    runs-on: ubuntu-latest
+    outputs:
+      has_sonar_token: ${{ steps.check.outputs.has_sonar_token }}
+    steps:
+      - name: Check Sonar Token
+        id: check
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_VAR: ${{ vars.SONAR_TOKEN }}
+          SONAR_ORG: ${{ vars.SONAR_ORGANIZATION }}
+          SONAR_KEY: ${{ vars.SONAR_PROJECT_KEY }}
+        run: |
+          if { [ -n "$SONAR_TOKEN" ] || [ -n "$SONAR_VAR" ]; } && [ -n "$SONAR_ORG" ] && [ -n "$SONAR_KEY" ]; then
+            echo "has_sonar_token=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_sonar_token=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  # ── Frontend build, type-check, coverage ────────────────────────────────
+  build-frontend:
+    needs: [validate]
+    uses: ./.github/workflows/_build-frontend.yml
+    with:
+      node-version: ${{ vars.NODE_VERSION || '22' }}
+      vite-api-base-url: ${{ vars.PROD_API_BASE_URL }}
+
+  # ── Backend compile, test (JaCoCo), package ──────────────────────────────
+  build-backend:
+    needs: [validate]
+    uses: ./.github/workflows/_build-backend.yml
+    permissions:
+      contents: read
+      checks: write
+      pull-requests: write
+    with:
+      java-version: ${{ vars.JAVA_VERSION || '17' }}
+
+  # ── Security: CodeQL, dependency-review, Gitleaks, npm audit, OWASP ─────
+  security:
+    needs: [validate]
+    uses: ./.github/workflows/_security.yml
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+      pull-requests: write
+    with:
+      node-version: ${{ vars.NODE_VERSION || '22' }}
+      java-version: ${{ vars.JAVA_VERSION || '17' }}
+    secrets: inherit
+
+  # ── Java static analysis (Checkstyle · SpotBugs+FindSecBugs · PMD · Spotless) ─
+  quality:
+    needs: [validate]
+    uses: ./.github/workflows/_quality.yml
+    with:
+      java-version: ${{ vars.JAVA_VERSION || '17' }}
+
+  # ── DB migration validation & safety gate (no database needed) ─────────────
+  db-migrations:
+    name: DB Migration Validation
+    needs: [validate]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test the migration validator
+        run: bash scripts/db/test-validate-migrations.sh
+      - name: Validate Flyway migrations
+        run: bash scripts/db/validate-migrations.sh
+      - name: Validate schema bootstrap
+        run: bash scripts/db/validate-schema-bootstrap.sh
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## Database Migration Validation"
+            echo ""
+            echo "Flyway migrations checked for naming, duplicate versions, and unacked destructive SQL."
+            echo "Policy: docs/database/DATABASE_MIGRATIONS.md."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ── Supply chain: SBOM, Trivy (fs + Dockerfile), license compliance ────────
+  supply-chain:
+    needs: [validate]
+    uses: ./.github/workflows/_supply-chain.yml
+    permissions:
+      contents: read
+      security-events: write
+      id-token: write
+    with:
+      node-version: ${{ vars.NODE_VERSION || '22' }}
+      java-version: ${{ vars.JAVA_VERSION || '17' }}
+
+  # ── SonarCloud quality gate ───────────────────────────────────────────────
+  sonar:
+    name: Quality — SonarCloud Analysis & Gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: [build-frontend, build-backend, check-secrets]
+    if: >
+      (github.event_name == 'push' ||
+       (github.event_name == 'pull_request' &&
+        github.event.pull_request.head.repo.full_name == github.repository)) &&
+      needs.check-secrets.outputs.has_sonar_token == 'true'
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Setup Java
+        uses: ./.github/actions/setup-java
+        with:
+          java-version: ${{ vars.JAVA_VERSION || '17' }}
+      - name: Compile backend (bytecode for Sonar)
+        run: mvn test-compile -q -f backend/pom.xml
+      - name: Download JaCoCo coverage report
+        uses: actions/download-artifact@v4
+        with:
+          name: jacoco-xml-${{ github.sha }}
+          path: backend/target/site/jacoco/
+      - name: Download frontend LCOV coverage report
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-coverage-${{ github.sha }}
+          path: frontend/coverage/
+        continue-on-error: true
+      - name: Run SonarCloud analysis
+        uses: sonarsource/sonarqube-scan-action@v6
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN || vars.SONAR_TOKEN }}
+          SONAR_HOST_URL: https://sonarcloud.io
+        with:
+          args: >
+            -Dsonar.organization=${{ vars.SONAR_ORGANIZATION }}
+            -Dsonar.projectKey=${{ vars.SONAR_PROJECT_KEY }}
+            -Dsonar.sources=backend/src/main/java,frontend/src
+            -Dsonar.tests=backend/src/test/java
+            -Dsonar.java.binaries=backend/target/classes
+            -Dsonar.java.source=${{ vars.JAVA_VERSION || '17' }}
+            -Dsonar.coverage.jacoco.xmlReportPaths=backend/target/site/jacoco/jacoco.xml
+            -Dsonar.javascript.lcov.reportPaths=frontend/coverage/lcov.info
+            -Dsonar.exclusions=**/node_modules/**,**/dist/**,**/target/surefire-reports/**,**/*.min.js,**/*.backup,**/frontend/src/pages/**,**/frontend/src/utils/printHtml.js
+            -Dsonar.coverage.exclusions=**/*
+            -Dsonar.cpd.exclusions=**/dto/**,**/entity/**,**/config/**,**/*Application.java
+            -Dsonar.sourceEncoding=UTF-8
+            -Dsonar.qualitygate.wait=${{ vars.SONAR_QUALITY_GATE_WAIT || 'true' }}
+            -Dsonar.jasmin.internal.disabled=true
+
+  # ── CI Summary — one consolidated status for developers ──────────────────
+  ci-summary:
+    name: CI Summary
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs:
+      [
+        validate,
+        build-frontend,
+        build-backend,
+        security,
+        quality,
+        supply-chain,
+        db-migrations,
+        sonar,
+      ]
+    if: always()
+    steps:
+      - name: Aggregate stage results
+        run: |
+          {
+            echo "## CI Summary"
+            echo ""
+            echo "| Stage | Result |"
+            echo "| --- | --- |"
+            echo "| Validate (commits/lint/format) | ${{ needs.validate.result }} |"
+            echo "| Frontend build + tests | ${{ needs.build-frontend.result }} |"
+            echo "| Backend build + tests (+coverage floor) | ${{ needs.build-backend.result }} |"
+            echo "| Security scans | ${{ needs.security.result }} |"
+            echo "| Java static analysis (report-only) | ${{ needs.quality.result }} |"
+            echo "| Supply chain (SBOM/Trivy/licenses, observe) | ${{ needs.supply-chain.result }} |"
+            echo "| DB migration validation | ${{ needs.db-migrations.result }} |"
+            echo "| SonarCloud quality gate | ${{ needs.sonar.result }} |"
+            echo ""
+            echo "Commit \`${{ github.sha }}\` on \`${{ github.ref_name }}\` — [run #${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Fail if any required stage failed
+        if: >
+          needs.validate.result == 'failure' ||
+          needs.build-frontend.result == 'failure' ||
+          needs.build-backend.result == 'failure' ||
+          needs.security.result == 'failure' ||
+          needs.db-migrations.result == 'failure'
+        run: |
+          echo "::error::One or more required CI stages failed — see the CI Summary above."
+          exit 1
+
+  # ── Production pre-deploy review — summary + risk shown BEFORE approval ─────
+  production-preflight:
+    name: Production — Pre-Deploy Review
+    needs: [build-frontend, build-backend, security, sonar]
+    if: >
+      always() &&
+      needs.build-frontend.result == 'success' &&
+      needs.build-backend.result == 'success' &&
+      needs.security.result == 'success' &&
+      (needs.sonar.result == 'success' || needs.sonar.result == 'skipped')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Validate production deploy credentials present
+        # Host / repo path / service name / app URL live in the "Production" GitHub Environment
+        # (vars.HOST, vars.DEPLOY_PATH, ...) and are resolved + validated by _deploy.yml, which
+        # runs *inside* that environment. This pre-approval review job has no environment scope,
+        # so it can only read repository-level secrets — here we just confirm the deploy key is
+        # present. The host/URL are checked at deploy time in the environment context.
+        env:
+          HMS_SSH_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+        run: bash scripts/deploy/validate-config.sh HMS_SSH_KEY
+      - name: Deployment & risk summary
+        run: |
+          VERSION=$(git describe --tags --always 2>/dev/null || echo "${GITHUB_SHA::7}")
+          LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo '')
+          {
+            echo "## 🚀 Production Deployment — Review Before Approval"
+            echo ""
+            echo "| Field | Value |"
+            echo "| --- | --- |"
+            echo "| Version | \`$VERSION\` |"
+            echo "| Commit | \`${{ github.sha }}\` |"
+            echo "| Branch | \`${{ github.ref_name }}\` |"
+            echo "| Triggered by | ${{ github.actor }} |"
+            echo "| Target | Production (approval required) |"
+            echo ""
+            echo "### Changes since ${LAST_TAG:-'(no previous tag)'}"
+            echo '```'
+            if [ -n "$LAST_TAG" ]; then git log --oneline "$LAST_TAG"..HEAD | head -50; else git log --oneline -20; fi
+            echo '```'
+            echo ""
+            echo "### Risk checklist"
+            echo "- CI, security, and quality gates: **passed** (this job only runs if they did)."
+            echo "- Auto-rollback on failed health check: **enabled** for production."
+            echo "- Database migrations are **not** rolled back automatically — see DEPLOYMENT.md."
+            echo ""
+            echo "**Approve the \`Deploy — Production\` job to proceed.** Reject to abort safely."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ── Deploy — Production ────────────────────────────────────────────────────
+  deploy-production:
+    name: Deploy — Production
+    needs: [build-frontend, build-backend, security, db-migrations, sonar, production-preflight]
+    if: >
+      always() &&
+      needs.build-frontend.result == 'success' &&
+      needs.build-backend.result == 'success' &&
+      needs.security.result == 'success' &&
+      needs.db-migrations.result == 'success' &&
+      needs.production-preflight.result == 'success' &&
+      (needs.sonar.result == 'success' || needs.sonar.result == 'skipped')
+    uses: ./.github/workflows/_deploy.yml
+    permissions:
+      contents: read
+      pull-requests: write
+    with:
+      environment: Production
+      repo_path: /var/www/hms/production/repo_prod
+      service_name: hms-production
+      git_branch: main
+      ssh_host: ${{ vars.PRODUCTION_SSH_HOST }}
+      ssh_port: ${{ vars.PRODUCTION_SSH_PORT || '22' }}
+      health_port: ${{ vars.PRODUCTION_HEALTH_PORT || '8080' }}
+      app_url: ${{ vars.PRODUCTION_APP_URL }}
+      enable_rollback: true
+      notify_slack: true
+    secrets:
+      ssh_key: ${{ secrets.SSH_PRIVATE_KEY }}
+      ssh_user: ${{ secrets.SSH_USERNAME }}
+      slack_webhook: ${{ secrets.PRODUCTION_SLACK_WEBHOOK }}

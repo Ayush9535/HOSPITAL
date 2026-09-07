@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<suppressions xmlns="https://jeremylong.github.io/DependencyCheck/dependency-suppression.1.3.xsd">
+
+    <!--
+        ── openhtmltopdf-pdfbox 1.0.10 ────────────────────────────────────────
+        This library bundles Apache PDFBox 2.0.x internally.
+        The CVEs below require an attacker to supply malicious PDF/HTML input
+        to the parser. In this system, openhtmltopdf is used exclusively for
+        server-side rendering of hospital bill and prescription templates using
+        sanitised, internally-generated data. No user-supplied content ever
+        reaches the PDF renderer. These are not exploitable in this context.
+
+        Review these suppressions when upgrading openhtmltopdf or switching to
+        an actively-maintained fork (e.g. openhtmltopdf-java / flyingsaucer).
+    -->
+    <suppress>
+        <notes>openhtmltopdf bundles PDFBox — not exploitable (server-side trusted data only)</notes>
+        <packageUrl regex="true">^pkg:maven/com\.openhtmltopdf/openhtmltopdf.*@.*$</packageUrl>
+        <cve>CVE-2021-31811</cve>
+    </suppress>
+    <suppress>
+        <notes>openhtmltopdf bundles PDFBox — not exploitable (server-side trusted data only)</notes>
+        <packageUrl regex="true">^pkg:maven/com\.openhtmltopdf/openhtmltopdf.*@.*$</packageUrl>
+        <cve>CVE-2021-31812</cve>
+    </suppress>
+    <suppress>
+        <notes>openhtmltopdf bundles PDFBox — not exploitable (server-side trusted data only)</notes>
+        <packageUrl regex="true">^pkg:maven/com\.openhtmltopdf/openhtmltopdf.*@.*$</packageUrl>
+        <cve>CVE-2022-28366</cve>
+    </suppress>
+    <suppress>
+        <notes>openhtmltopdf bundles PDFBox — not exploitable (server-side trusted data only)</notes>
+        <packageUrl regex="true">^pkg:maven/com\.openhtmltopdf/openhtmltopdf.*@.*$</packageUrl>
+        <cve>CVE-2021-27906</cve>
+    </suppress>
+    <suppress>
+        <notes>openhtmltopdf bundles PDFBox — not exploitable (server-side trusted data only)</notes>
+        <packageUrl regex="true">^pkg:maven/com\.openhtmltopdf/openhtmltopdf.*@.*$</packageUrl>
+        <cve>CVE-2021-27807</cve>
+    </suppress>
+
+    <!--
+        ── OpenPDF 1.3.30 ─────────────────────────────────────────────────────
+        OpenPDF is used for server-side bill/prescription PDF generation only.
+        All input data comes from the hospital database (trusted source).
+        No external/user-supplied PDFs are parsed. Remote exploitation is not
+        possible in this deployment model.
+    -->
+    <suppress>
+        <notes>OpenPDF — server-side generation only, no external PDF parsing</notes>
+        <packageUrl regex="true">^pkg:maven/com\.github\.librepdf/openpdf@.*$</packageUrl>
+        <vulnerabilityName regex="true">.*</vulnerabilityName>
+    </suppress>
+
+</suppressions>

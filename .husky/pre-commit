@@ -1,0 +1,4 @@
+# Pre-commit: FAST checks only (target < 15s). Never runs the full test suite.
+# 1) block secrets in staged changes  2) lint + format staged files.
+node scripts/secret-scan.mjs || exit 1
+npx lint-staged || exit 1

@@ -57,4 +57,19 @@ public class IpdAdmission {
 
     @Column(name = "notes", columnDefinition = "text")
     private String notes;
+
+    /**
+     * Whether the nurse has completed the admission form and confirmed the
+     * patient as admitted (after collecting the signed printed form). Until then
+     * the admission is "pending" even though a bed is reserved.
+     */
+    @Column(name = "admission_confirmed", nullable = false)
+    private Boolean admissionConfirmed = false;
+
+    @Column(name = "admission_confirmed_at")
+    private LocalDateTime admissionConfirmedAt;
+
+    /** users.id of the receptionist/admin who admitted the patient (assigned ward/bed). */
+    @Column(name = "admitted_by_user_id")
+    private Long admittedByUserId;
 }

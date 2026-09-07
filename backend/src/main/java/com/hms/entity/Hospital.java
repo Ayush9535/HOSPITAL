@@ -45,15 +45,22 @@ public class Hospital {
     @Column(name = "custom_id", unique = true)
     private String customId;
 
+    // Reused SecureRandom for the numeric suffix of custom IDs (a single shared, non-predictable
+    // instance rather than a new java.util.Random() per call).
+    private static final java.security.SecureRandom CUSTOM_ID_RANDOM = new java.security.SecureRandom();
+
     @PrePersist
     public void generateIds() {
         if (this.publicId == null) {
             this.publicId = java.util.UUID.randomUUID().toString();
         }
         if (this.customId == null) {
-            // Generate simple random readable ID: HSP + 4 random digits
-            // Note: In production, check for uniqueness or use a sequence
-            this.customId = "HSP" + (1000 + new java.util.Random().nextInt(9000));
+            String prefix = switch (this.type != null ? this.type : HospitalType.HOSPITAL) {
+                case CLINIC   -> "CLN";
+                case PHARMACY -> "PHR";
+                default       -> "HSP";
+            };
+            this.customId = prefix + (1000 + CUSTOM_ID_RANDOM.nextInt(9000));
         }
     }
 
@@ -69,6 +76,12 @@ public class Hospital {
     @Column(length = 20)
     private String phone;
 
+    @Column(name = "logo_url", length = 500)
+    private String logoUrl;
+
+    @Column(name = "parent_organization", length = 200)
+    private String parentOrganization;
+
     /**
      * Whether the hospital is currently active
      * Inactive hospitals cannot be accessed by their users
@@ -76,12 +89,20 @@ public class Hospital {
     @Column(nullable = false)
     private Boolean isActive = true;
 
-    /**
-     * Subscription plan for the hospital (FREE or PAID)
-     * Manual management in Phase-1, no automated billing
-     */
+    @Enumerated(EnumType.STRING)
     @Column(nullable = false, length = 20)
-    private String plan = "FREE";
+    private HospitalType type = HospitalType.HOSPITAL;
+
+    @Column(name = "subscription_status", nullable = false, length = 20)
+    private String subscriptionStatus = "ACTIVE";
+
+    /**
+     * Current subscription plan name — not persisted; populated on read (e.g. in
+     * the platform hospital list) from the hospital's current plan subscription
+     * so the UI can show the actual plan instead of a hardcoded default.
+     */
+    @Transient
+    private String planName;
 
     /**
      * CMS: Standard consultation fee for OPD
@@ -115,7 +136,13 @@ public class Hospital {
     @ElementCollection(fetch = FetchType.EAGER)
     @CollectionTable(name = "hospital_modules", joinColumns = @JoinColumn(name = "hospital_id"))
     @Column(name = "module_name")
-    private java.util.List<String> modules = new java.util.ArrayList<>(java.util.Arrays.asList("OPD", "BILLING"));
+    private java.util.List<String> modules = new java.util.ArrayList<>();
+
+    /**
+     * Whether this hospital is a single doctor hospital.
+     */
+    @Column(name = "is_single_doctor", nullable = false)
+    private Boolean isSingleDoctor = false;
 
     public Long getId() {
         return id;
@@ -173,13 +200,11 @@ public class Hospital {
         this.isActive = isActive;
     }
 
-    public String getPlan() {
-        return plan;
-    }
+    public HospitalType getType() { return type; }
+    public void setType(HospitalType type) { this.type = type; }
 
-    public void setPlan(String plan) {
-        this.plan = plan;
-    }
+    public String getSubscriptionStatus() { return subscriptionStatus; }
+    public void setSubscriptionStatus(String subscriptionStatus) { this.subscriptionStatus = subscriptionStatus; }
 
     public java.math.BigDecimal getConsultationFee() {
         return consultationFee;
@@ -219,5 +244,29 @@ public class Hospital {
 
     public void setModules(java.util.List<String> modules) {
         this.modules = modules;
+    }
+
+    public Boolean getIsSingleDoctor() {
+        return isSingleDoctor;
+    }
+
+    public void setIsSingleDoctor(Boolean isSingleDoctor) {
+        this.isSingleDoctor = isSingleDoctor;
+    }
+
+    public String getLogoUrl() {
+        return logoUrl;
+    }
+
+    public void setLogoUrl(String logoUrl) {
+        this.logoUrl = logoUrl;
+    }
+
+    public String getParentOrganization() {
+        return parentOrganization;
+    }
+
+    public void setParentOrganization(String parentOrganization) {
+        this.parentOrganization = parentOrganization;
     }
 }

@@ -1,0 +1,123 @@
+name: Rollback Deployment
+
+# Operator-triggered rollback. Restores the previous artifact set that the last deployment saved
+# on the VPS (../rollback_backup), restarts the service, and re-verifies health — then records a
+# rollback report + manifest for the audit trail. Manual only; never runs automatically.
+#
+# Production rollback reuses the Production Environment's approval gate (reviewers must approve).
+# Shares the `deploy-<env>` concurrency group so a rollback can't race an in-flight deploy.
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Environment to roll back
+        required: true
+        type: choice
+        options: [Staging, Production]
+      reason:
+        description: Why are you rolling back? (recorded in the audit trail)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-${{ inputs.environment }}
+  cancel-in-progress: false
+
+jobs:
+  rollback:
+    name: Rollback ${{ inputs.environment }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment:
+      name: ${{ inputs.environment }} # Production → requires approval (reviewers)
+    steps:
+      # Pin to SHA in production: https://github.com/actions/checkout/releases
+      - uses: actions/checkout@v4
+
+      # This job DOES run inside the target GitHub Environment (see `environment:` above), so
+      # environment-scoped vars are readable. The host lives there as `vars.HOST`; the
+      # PRODUCTION_/STAGING_ names are optional repository-level overrides. Resolving in that
+      # order mirrors _deploy.yml so rollback reaches the same box the deploy did.
+      - name: Resolve environment settings
+        id: env
+        run: |
+          if [ "${{ inputs.environment }}" = "Production" ]; then
+            {
+              echo "repo_path=${{ vars.PRODUCTION_DEPLOY_PATH || '/var/www/hms/production/repo_prod' }}"
+              echo "service=hms-production"
+              echo "host=${{ vars.PRODUCTION_SSH_HOST || vars.HOST || vars.SSH_HOST }}"
+              echo "port=${{ vars.PRODUCTION_SSH_PORT || '22' }}"
+              echo "hport=${{ vars.PRODUCTION_HEALTH_PORT || '8080' }}"
+            } >> "$GITHUB_OUTPUT"
+          else
+            {
+              echo "repo_path=${{ vars.STAGING_DEPLOY_PATH || '/var/www/hms/staging/repo_stage' }}"
+              echo "service=hms-staging"
+              echo "host=${{ vars.STAGING_SSH_HOST || vars.HOST || vars.SSH_HOST }}"
+              echo "port=${{ vars.STAGING_SSH_PORT || '22' }}"
+              echo "hport=${{ vars.STAGING_HEALTH_PORT || '8080' }}"
+            } >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Validate configuration
+        env:
+          HMS_HOST: ${{ steps.env.outputs.host }}
+          HMS_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+        run: bash scripts/deploy/validate-config.sh HMS_HOST HMS_KEY
+
+      - name: Execute rollback on VPS
+        id: run
+        env:
+          SSH_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_HOST: ${{ steps.env.outputs.host }}
+          SSH_PORT: ${{ steps.env.outputs.port }}
+          SSH_USER: ${{ secrets.SSH_USERNAME || 'deploy' }}
+          REPO: ${{ steps.env.outputs.repo_path }}
+          SERVICE: ${{ steps.env.outputs.service }}
+          HPORT: ${{ steps.env.outputs.hport }}
+        run: |
+          mkdir -p rollback-logs
+          echo "$SSH_KEY" > /tmp/deploy_key && chmod 600 /tmp/deploy_key
+          LIVE="http://localhost:${HPORT}/api/public/health"
+          set -o pipefail
+          ssh -i /tmp/deploy_key -o StrictHostKeyChecking=no -o ConnectTimeout=20 \
+            -p "$SSH_PORT" "$SSH_USER@$SSH_HOST" \
+            "bash '$REPO'/scripts/deploy/rollback.sh '$REPO' '$SERVICE' '$LIVE'" \
+            | tee rollback-logs/rollback-report.txt
+          rc=$?
+          rm -f /tmp/deploy_key
+          exit $rc
+
+      - name: Rollback summary
+        if: always()
+        run: |
+          {
+            echo "## ⏪ Rollback — ${{ inputs.environment }}"
+            echo ""
+            echo "| Field | Value |"
+            echo "| --- | --- |"
+            echo "| Environment | ${{ inputs.environment }} |"
+            echo "| Result | ${{ steps.run.outcome }} |"
+            echo "| Triggered by | ${{ github.actor }} |"
+            echo "| Reason | ${{ inputs.reason }} |"
+            echo "| Run | [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) |"
+            echo ""
+            echo "### Rollback report"
+            echo '```'
+            cat rollback-logs/rollback-report.txt 2>/dev/null || echo "(no report captured)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload rollback logs
+        if: always()
+        # Pin to SHA in production: https://github.com/actions/upload-artifact/releases
+        uses: actions/upload-artifact@v4
+        with:
+          name: rollback-${{ inputs.environment }}-${{ github.run_id }}
+          path: rollback-logs/
+          retention-days: 90
+          if-no-files-found: warn

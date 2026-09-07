@@ -1,0 +1,82 @@
+# Dependabot — automated dependency updates + security patches.
+# Policy & rationale: docs/security/DEPENDENCY_POLICY.md
+#
+# GitHub applies security updates (Dependabot Alerts) automatically once the feature is
+# enabled in repo Settings; this file additionally schedules *version* updates so we don't
+# drift far behind upstream (which is what makes urgent security bumps risky).
+version: 2
+
+updates:
+  # ── Frontend (npm) ────────────────────────────────────────────────────────
+  - package-ecosystem: npm
+    directory: /frontend
+    schedule:
+      interval: weekly
+      day: monday
+      time: '06:00'
+      timezone: Asia/Kolkata
+    open-pull-requests-limit: 5
+    labels: ['dependencies', 'frontend', 'security']
+    commit-message:
+      prefix: 'chore(deps)'
+      prefix-development: 'chore(deps-dev)'
+    groups:
+      # One PR for the low-risk minor/patch churn; majors come as individual PRs to review.
+      frontend-minor-patch:
+        patterns: ['*']
+        update-types: ['minor', 'patch']
+
+  # ── Root dev tooling (npm) — husky, lint-staged, commitlint, eslint, playwright ──
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: '06:00'
+      timezone: Asia/Kolkata
+    open-pull-requests-limit: 5
+    labels: ['dependencies', 'tooling']
+    commit-message:
+      prefix: 'chore(deps)'
+    groups:
+      root-tooling:
+        patterns: ['*']
+        update-types: ['minor', 'patch']
+
+  # ── Backend (Maven) ───────────────────────────────────────────────────────
+  - package-ecosystem: maven
+    directory: /backend
+    schedule:
+      interval: weekly
+      day: monday
+      time: '06:00'
+      timezone: Asia/Kolkata
+    open-pull-requests-limit: 5
+    labels: ['dependencies', 'backend', 'security']
+    commit-message:
+      prefix: 'chore(deps)'
+    # Spring Boot is the parent BOM — let its managed transitive versions move as a group,
+    # and never auto-bump the major (breaking) line unattended.
+    groups:
+      backend-minor-patch:
+        patterns: ['*']
+        update-types: ['minor', 'patch']
+    ignore:
+      - dependency-name: 'org.springframework.boot:*'
+        update-types: ['version-update:semver-major']
+
+  # ── GitHub Actions ────────────────────────────────────────────────────────
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: '06:00'
+      timezone: Asia/Kolkata
+    open-pull-requests-limit: 5
+    labels: ['dependencies', 'ci', 'security']
+    commit-message:
+      prefix: 'ci(deps)'
+    groups:
+      actions-all:
+        patterns: ['*']

@@ -1,0 +1,145 @@
+name: Build Backend
+
+on:
+  workflow_call:
+    inputs:
+      java-version:
+        type: string
+        default: '17'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      checks: write
+      pull-requests: write
+    defaults:
+      run:
+        working-directory: backend
+
+    steps:
+      # Pin to SHA in production: https://github.com/actions/checkout/releases
+      - uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: ./.github/actions/setup-java
+        with:
+          java-version: ${{ inputs.java-version }}
+
+      - name: Compile
+        run: mvn compile -q
+
+      # JaCoCo (agent + report + coverage-floor check) is bound to the Maven lifecycle in
+      # pom.xml, so a plain `verify` produces the report at target/site/jacoco/jacoco.xml
+      # and enforces the coverage floor. See docs/quality/CODE_QUALITY.md.
+      - name: Run tests with JaCoCo (coverage floor enforced)
+        env:
+          JWT_SECRET: ci-test-secret-not-used-in-real-environment
+        run: mvn -B verify --no-transfer-progress
+
+      - name: Publish JUnit report
+        if: always()
+        # Pin to SHA in production: https://github.com/dorny/test-reporter/releases
+        uses: dorny/test-reporter@v1
+        with:
+          name: JUnit — Backend
+          path: backend/target/surefire-reports/TEST-*.xml
+          reporter: java-junit
+          fail-on-error: 'true'
+
+      - name: Write backend coverage summary
+        if: always()
+        run: |
+          python3 - <<'EOF'
+          import os, sys
+
+          xml_path = "target/site/jacoco/jacoco.xml"
+          step_summary = os.environ.get("GITHUB_STEP_SUMMARY", "/dev/null")
+
+          if not os.path.exists(xml_path):
+              with open(step_summary, "a") as f:
+                  f.write("## Backend Coverage\n\nJaCoCo XML not found.\n")
+              sys.exit(0)
+
+          # Strip DOCTYPE lines so ElementTree can parse
+          lines = []
+          with open(xml_path, encoding="utf-8") as f:
+              for line in f:
+                  if "<!DOCTYPE" not in line:
+                      lines.append(line)
+
+          import xml.etree.ElementTree as ET
+          try:
+              root = ET.fromstring("".join(lines))
+          except Exception as e:
+              with open(step_summary, "a") as f:
+                  f.write(f"## Backend Coverage\n\nFailed to parse JaCoCo XML report: {e}\n")
+              sys.exit(0)
+
+          metrics = {}
+          for counter in root.findall("counter"):
+              t = counter.attrib.get("type", "")
+              missed = int(counter.attrib.get("missed", 0))
+              covered = int(counter.attrib.get("covered", 0))
+              total = missed + covered
+              pct = f"{100 * covered / total:.1f}%" if total else "N/A"
+              metrics[t] = pct
+
+          table = (
+              "## Backend Coverage\n\n"
+              "| Metric | Coverage |\n"
+              "| --- | --- |\n"
+              f"| Instructions | {metrics.get('INSTRUCTION', 'N/A')} |\n"
+              f"| Branches     | {metrics.get('BRANCH', 'N/A')} |\n"
+              f"| Lines        | {metrics.get('LINE', 'N/A')} |\n"
+              f"| Methods      | {metrics.get('METHOD', 'N/A')} |\n"
+              f"| Classes      | {metrics.get('CLASS', 'N/A')} |\n"
+          )
+
+          with open(step_summary, "a") as f:
+              f.write(table)
+          EOF
+
+      - name: Upload Surefire results
+        if: always()
+        # Pin to SHA in production: https://github.com/actions/upload-artifact/releases
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-${{ github.sha }}
+          path: backend/target/surefire-reports/
+          retention-days: 14
+          if-no-files-found: warn
+
+      - name: Upload JaCoCo XML
+        if: always()
+        # Pin to SHA in production: https://github.com/actions/upload-artifact/releases
+        uses: actions/upload-artifact@v4
+        with:
+          name: jacoco-xml-${{ github.sha }}
+          path: backend/target/site/jacoco/jacoco.xml
+          retention-days: 7
+          if-no-files-found: warn
+
+      - name: Upload JaCoCo HTML
+        if: always()
+        # Pin to SHA in production: https://github.com/actions/upload-artifact/releases
+        uses: actions/upload-artifact@v4
+        with:
+          name: jacoco-html-${{ github.sha }}
+          path: backend/target/site/jacoco/
+          retention-days: 14
+          if-no-files-found: warn
+
+      - name: Package JAR
+        run: mvn package -DskipTests -q
+
+      - name: Upload JAR
+        # Pin to SHA in production: https://github.com/actions/upload-artifact/releases
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-jar-${{ github.sha }}
+          path: backend/target/*.jar
+          retention-days: 7
+          if-no-files-found: error

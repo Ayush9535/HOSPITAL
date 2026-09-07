@@ -1,0 +1,49 @@
+{
+  "name": "hms-dev-platform",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Local developer platform (git hooks, linting, formatting, commit rules, secret scanning) for the Hospital Management System monorepo. This root package manages repo-level tooling only; the app lives in backend/ (Maven) and frontend/ (Vite).",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "prepare": "husky",
+    "bootstrap": "npm install && npm --prefix frontend install",
+    "lint": "eslint \"frontend/**/*.{js,jsx}\"",
+    "lint:fix": "eslint \"frontend/**/*.{js,jsx}\" --fix",
+    "format": "prettier --write \"frontend/**/*.{js,jsx,json,css,md}\" \"*.{json,md}\"",
+    "format:check": "prettier --check \"frontend/**/*.{js,jsx,json,css,md}\" \"*.{json,md}\"",
+    "format:java": "mvn -f backend/pom.xml -q spotless:apply",
+    "format:java:check": "mvn -f backend/pom.xml -q spotless:check",
+    "typecheck": "npm --prefix frontend run typecheck",
+    "test:frontend": "npm --prefix frontend test",
+    "test:backend": "mvn -f backend/pom.xml -q test",
+    "test:backend:it": "mvn -f backend/pom.xml -q verify",
+    "test:e2e": "playwright test --config e2e/playwright.config.js",
+    "secret-scan": "node scripts/secret-scan.mjs --all",
+    "verify": "npm run lint && npm run typecheck && npm run test:frontend && npm run test:backend"
+  },
+  "devDependencies": {
+    "@commitlint/cli": "^19.6.0",
+    "@commitlint/config-conventional": "^19.6.0",
+    "@playwright/test": "^1.49.1",
+    "@eslint/js": "^9.16.0",
+    "eslint": "^9.16.0",
+    "eslint-config-prettier": "^9.1.0",
+    "eslint-plugin-import": "^2.31.0",
+    "eslint-plugin-jsx-a11y": "^6.10.2",
+    "eslint-plugin-react": "^7.37.2",
+    "eslint-plugin-react-hooks": "^5.1.0",
+    "eslint-plugin-react-refresh": "^0.4.16",
+    "eslint-plugin-unused-imports": "^4.1.4",
+    "globals": "^15.13.0",
+    "husky": "^9.1.7",
+    "lint-staged": "^15.2.11",
+    "prettier": "^3.4.2",
+    "typescript": "~5.9.3"
+  },
+  "overrides": {
+    "typescript": "~5.9.3"
+  }
+}

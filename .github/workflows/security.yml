@@ -1,0 +1,36 @@
+# ────────────────────────────────────────────
+# Security Scans — Hospital Management System
+# ────────────────────────────────────────────
+
+name: Security
+
+on:
+  push:
+    branches-ignore:
+      - main
+      - staging
+    tags:
+      - 'v*'
+  pull_request:
+    branches:
+      - main
+      - staging
+  workflow_dispatch:
+
+concurrency:
+  group: security-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  security-events: write
+  actions: read
+  pull-requests: write
+
+jobs:
+  security:
+    uses: ./.github/workflows/_security.yml
+    with:
+      node-version: ${{ vars.NODE_VERSION || '22' }}
+      java-version: ${{ vars.JAVA_VERSION || '17' }}
+    secrets: inherit

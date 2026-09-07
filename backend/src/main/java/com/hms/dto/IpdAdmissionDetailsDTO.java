@@ -55,6 +55,14 @@ public class IpdAdmissionDetailsDTO {
         public BigDecimal balance;
     }
 
+    public static class AdministeredItemDTO {
+        public String name;
+        public Integer quantity;
+        public String administeredAt; // date of the medical record / billing entry
+    }
+
+    private List<AdministeredItemDTO> administeredItems;
+
     public String getIpdNumber() { return ipdNumber; }
     public void setIpdNumber(String ipdNumber) { this.ipdNumber = ipdNumber; }
 
@@ -78,4 +86,7 @@ public class IpdAdmissionDetailsDTO {
 
     public BillingDTO getBilling() { return billing; }
     public void setBilling(BillingDTO billing) { this.billing = billing; }
+
+    public List<AdministeredItemDTO> getAdministeredItems() { return administeredItems; }
+    public void setAdministeredItems(List<AdministeredItemDTO> administeredItems) { this.administeredItems = administeredItems; }
 }
