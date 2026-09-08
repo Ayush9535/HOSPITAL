@@ -1,5 +1,7 @@
 package com.hms.security;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.hms.entity.Bed;
 import com.hms.entity.Doctor;
 import com.hms.entity.Hospital;
@@ -263,6 +265,32 @@ class IcuCrossRoleJourneyTest {
         assertThat(res.getStatusCode().value()).as("%s -> %s", step, res.getBody()).isEqualTo(200);
     }
 
+    /**
+     * Parse the body so assertions can name a field.
+     *
+     * <p>Searching the whole serialized response for a bare number is what made
+     * {@code doesNotContain("250")} fail on a green build: every error body carries a
+     * {@code requestId} from CorrelationIdFilter, that id is a random UUID, and roughly one UUID
+     * in a few hundred happens to contain the digits 250. The test was reading a coincidence in a
+     * correlation id as a fluid volume leak. Field-level assertions cannot make that mistake.
+     */
+    private JsonNode json(ResponseEntity<String> res) {
+        try {
+            return MAPPER.readTree(res.getBody());
+        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+            throw new IllegalStateException("response was not JSON: " + res.getBody(), e);
+        }
+    }
+
+    /** Every volumeMl anywhere in a payload, however the response happens to be wrapped. */
+    private java.util.List<Integer> volumesIn(JsonNode node) {
+        java.util.List<Integer> found = new java.util.ArrayList<>();
+        node.findValues("volumeMl").forEach(v -> found.add(v.asInt()));
+        return found;
+    }
+
+    private static final ObjectMapper MAPPER = new ObjectMapper();
+
     /** Moves the patient between beds through the real transfer endpoint. */
     private ResponseEntity<String> transfer(Long bedId, String token) {
         return rest.exchange("/hospital/ipd/" + admissionId + "/change-bed?newBedId=" + bedId,
@@ -325,16 +353,21 @@ class IcuCrossRoleJourneyTest {
         // ---------------------------------------------------- persisted, read back cold
         ResponseEntity<String> io = get("/hospital/nurse/io/admission/" + admissionId, doctorToken);
         ok(io, "the doctor reads the fluid chart");
-        assertThat(io.getBody()).as("the intake the nurse recorded must still be there").contains("250");
+        assertThat(volumesIn(json(io)))
+                .as("the intake the nurse recorded must still be there")
+                .contains(250);
 
         ResponseEntity<String> balance = get("/hospital/nurse/io/admission/" + admissionId + "/balance", doctorToken);
         ok(balance, "the doctor reads the fluid balance");
 
         ResponseEntity<String> rates = get("/hospital/nurse/infusions/" + infusionPublicId + "/rates", doctorToken);
         ok(rates, "the doctor reads the infusion history");
-        assertThat(rates.getBody())
+        // "5" and "8" as bare substrings are in every response that carries a timestamp or an id,
+        // so the old form could not have failed. Read the rates themselves.
+        assertThat(json(rates).findValues("rateValue"))
                 .as("both the starting rate and the titration must be in the history")
-                .contains("5").contains("8");
+                .extracting(node -> node.decimalValue().stripTrailingZeros())
+                .contains(new BigDecimal("5"), new BigDecimal("8"));
 
         ok(post("/hospital/nurse/severity-scores", nurseToken,
                 "{\"ipdAdmissionId\":" + admissionId + ",\"scoreType\":\"SOFA\""
@@ -527,9 +560,29 @@ class IcuCrossRoleJourneyTest {
         assertThat(get("/hospital/icu/stays/" + stay.getPublicId(), otherDoctor).getStatusCode().value())
                 .as("another facility's stay must read as missing").isEqualTo(404);
 
-        assertThat(get("/hospital/nurse/io/admission/" + admissionId, otherDoctor).getBody())
-                .as("another facility must not read this admission's fluid chart")
-                .doesNotContain("250");
+        // There has to be something to leak before "nothing leaked" means anything. As written
+        // this test never recorded any fluid, so the assertion below would have held even against
+        // an endpoint that returned the whole ward.
+        assignNurseToPatient();
+        ok(post("/hospital/nurse/io", nurseToken, ioBody()), "the assigned nurse records 250 mL");
+        assertThat(volumesIn(json(get("/hospital/nurse/io/admission/" + admissionId, doctorToken))))
+                .as("the chart this test is about must actually hold the protected volume")
+                .contains(250);
+
+        ResponseEntity<String> foreignRead = get("/hospital/nurse/io/admission/" + admissionId, otherDoctor);
+
+        assertThat(foreignRead.getStatusCode().value())
+                .as("another facility's admission must read as missing, not as forbidden: a 403 " +
+                        "would confirm the id exists -> %s", foreignRead.getBody())
+                .isEqualTo(404);
+        JsonNode denial = json(foreignRead);
+        assertThat(denial.path("success").asBoolean(true)).isFalse();
+        assertThat(denial.path("error").asText()).isEqualTo("IPD admission not found");
+        assertThat(volumesIn(denial))
+                .as("and not one millilitre of the chart may come back with the denial")
+                .isEmpty();
+        assertThat(denial.findValues("route")).isEmpty();
+        assertThat(denial.findValues("ipdAdmissionId")).isEmpty();
 
         ResponseEntity<String> write = post("/hospital/nurse/io", otherDoctor, ioBody());
         assertThat(write.getStatusCode().is2xxSuccessful())
