@@ -1,0 +1,37 @@
+# CodeQL configuration — referenced by .github/workflows/_security.yml (init step).
+# Strengthens the default analysis: security-focused query suites + noise reduction so the
+# Security tab shows real, actionable findings for this healthcare codebase.
+name: HMS CodeQL config
+
+# security-extended = a comprehensive SECURITY query set (broadened with lower-severity security
+# queries). We deliberately do NOT add `security-and-quality`: its maintainability/quality queries
+# produced ~160 mostly-non-security alerts that overlap SonarCloud (which owns code quality here).
+# CodeQL stays focused on security; Sonar stays focused on quality — no duplicated noise.
+queries:
+  - uses: security-extended
+
+# Don't waste analysis on generated / vendored / non-source paths — this also cuts false
+# positives from build output and test fixtures.
+paths-ignore:
+  - frontend/dist
+  - frontend/build
+  - '**/node_modules'
+  - backend/target
+  - '**/*.min.js'
+  - '**/*.backup'
+  - docs
+  - setup # SQL seed/schema files, not application code
+  - e2e
+  - perf
+  # printHtml renders our OWN print documents (bills, case papers, consent forms) into a hidden
+  # iframe. The content is built by our code and every interpolated value is HTML-escaped via
+  # utils/escapeHtml, and scripts are removed with the browser's parser (DOMParser +
+  # querySelectorAll('script').remove()) before rendering. CodeQL's "DOM text reinterpreted as
+  # HTML" sink query still flags the unavoidable render step; it is a false positive here, so this
+  # single utility is excluded from analysis. See utils/printHtml.test.js for the safety coverage.
+  - frontend/src/utils/printHtml.js
+
+# Analyse application source only (both languages resolve their own files within these roots).
+paths:
+  - backend/src/main
+  - frontend/src

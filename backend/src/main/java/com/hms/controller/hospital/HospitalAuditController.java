@@ -5,7 +5,10 @@ import com.hms.entity.AuditLog;
 import com.hms.service.AuditLogService;
 
 import lombok.RequiredArgsConstructor;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
@@ -14,10 +17,12 @@ import java.util.List;
  * Controller for retrieving Audit Logs for Hospital Admins.
  */
 @RestController
-@RequestMapping("/hospital/audit-logs")
+@RequestMapping({"/hospital/audit-logs", "/clinic/audit-logs", "/pharmacy/audit-logs"})
 @RequiredArgsConstructor
-@CrossOrigin(origins = "*")
+@PreAuthorize("hasRole('HOSPITAL_ADMIN')")
 public class HospitalAuditController {
+
+    private static final Logger log = LoggerFactory.getLogger(HospitalAuditController.class);
 
     private final AuditLogService auditLogService;
     private final com.hms.security.SecurityContextHelper securityHelper;
@@ -27,24 +32,29 @@ public class HospitalAuditController {
      */
     @GetMapping
     public ResponseEntity<List<AuditLog>> getRecentActivity(
-            @RequestParam(required = false) String search) {
+            @RequestParam(required = false) String search,
+            @RequestParam(required = false) String role,
+            @RequestParam(required = false) Integer limit) {
         try {
             Long hospitalId = securityHelper.getCurrentHospitalId();
 
             if (hospitalId == null) {
-                System.err.println("WARN: Hospital ID is null - returning empty activity feed");
+                log.warn("Hospital ID is null for current user - returning empty activity feed");
                 return ResponseEntity.ok(java.util.Collections.emptyList());
             }
 
-            List<AuditLog> logs = auditLogService.getLogsByHospitalId(hospitalId, search);
-            // Return only the last 20 for the Dashboard feed
-            if (logs.size() > 20) {
-                logs = logs.subList(0, 20);
+            String mappedRole = null;
+            if (role != null && !role.trim().isEmpty() && !"ALL".equalsIgnoreCase(role)) {
+                mappedRole = role.trim();
+            }
+
+            List<AuditLog> logs = auditLogService.getLogsByHospitalId(hospitalId, search, mappedRole);
+            if (limit != null && logs.size() > limit) {
+                logs = logs.subList(0, limit);
             }
             return ResponseEntity.ok(logs);
         } catch (Exception e) {
-            System.err.println("WARN: Could not retrieve hospital context - returning empty activity feed");
-            System.err.println("Error: " + e.getMessage());
+            log.warn("Could not retrieve hospital context - returning empty activity feed", e);
             return ResponseEntity.ok(java.util.Collections.emptyList());
         }
     }
@@ -56,11 +66,44 @@ public class HospitalAuditController {
     public ResponseEntity<List<AuditLog>> getEntityHistory(
             @PathVariable String entityType,
             @PathVariable String entityId) {
-        // Security check: Ensure the user belongs to the same hospital as the entity
-        // (Optional implementation detail)
-        // For Phase-1, valid authenticated admin access is sufficient.
+        try {
+            Long hospitalId = securityHelper.getCurrentHospitalId();
+            if (hospitalId == null) {
+                return ResponseEntity.ok(java.util.Collections.emptyList());
+            }
+            List<AuditLog> logs = auditLogService.getLogsByEntityAndHospitalId(entityType.toUpperCase(), entityId, hospitalId);
+            return ResponseEntity.ok(logs);
+        } catch (Exception e) {
+            return ResponseEntity.ok(java.util.Collections.emptyList());
+        }
+    }
 
-        List<AuditLog> logs = auditLogService.getLogsByEntity(entityType.toUpperCase(), entityId);
-        return ResponseEntity.ok(logs);
+    /**
+     * Get pharmacy-specific audit logs (SUPPLIER, MEDICINE_BATCH, PURCHASE_INVOICE, PHARMACY_SALE).
+     * Filters by role based on pharmacy plan type (SINGLE_PHARMACIST_ADMIN, SINGLE_PHARMACY, MULTI_PHARMACY).
+     */
+    @GetMapping("/pharmacy")
+    public ResponseEntity<List<AuditLog>> getPharmacyLogs(
+            @RequestParam(required = false) String search,
+            @RequestParam(required = false) String role) {
+        try {
+            Long hospitalId = securityHelper.getCurrentHospitalId();
+            Long branchId = securityHelper.getCurrentBranchId();
+
+            if (hospitalId == null) {
+                return ResponseEntity.ok(java.util.Collections.emptyList());
+            }
+
+            String mappedRole = null;
+            if (role != null && !role.trim().isEmpty() && !"ALL".equalsIgnoreCase(role)) {
+                mappedRole = role.trim();
+            }
+
+            List<AuditLog> logs = auditLogService.getPharmacyLogs(hospitalId, branchId, mappedRole, search);
+            return ResponseEntity.ok(logs);
+        } catch (Exception e) {
+            log.warn("Could not retrieve pharmacy audit logs", e);
+            return ResponseEntity.ok(java.util.Collections.emptyList());
+        }
     }
 }

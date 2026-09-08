@@ -1,0 +1,13 @@
+{
+  "//": "Recommended (not forced) extensions. VS Code prompts contributors to install these.",
+  "recommendations": [
+    "dbaeumer.vscode-eslint",
+    "esbenp.prettier-vscode",
+    "editorconfig.editorconfig",
+    "redhat.java",
+    "vscjava.vscode-java-pack",
+    "redhat.vscode-xml",
+    "eamodio.gitlens",
+    "streetsidesoftware.code-spell-checker"
+  ]
+}

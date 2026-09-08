@@ -11,17 +11,8 @@ import java.util.Map;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 
-/**
- * ReceptionistController - Endpoints for managing receptionists
- * 
- * Accessible only by Hospital Admin.
- * 
- * @author HMS Team
- * @version Phase-1
- */
 @RestController
-@RequestMapping("/hospital/receptionists")
-@CrossOrigin(origins = { "http://localhost:3000", "http://localhost:5173" })
+@RequestMapping({"/hospital/receptionists", "/clinic/receptionists", "/pharmacy/receptionists"})
 @PreAuthorize("hasRole('HOSPITAL_ADMIN')")
 public class ReceptionistController {
 
@@ -30,20 +21,18 @@ public class ReceptionistController {
 
     @PostMapping
     public ResponseEntity<?> createReceptionist(@RequestBody Map<String, String> payload) {
-        try {
-            String name = payload.get("name");
-            String email = payload.get("email");
-            String password = payload.get("password");
+        String name = payload.get("name");
+        String email = payload.get("email");
+        String password = payload.get("password");
 
-            if (name == null || email == null || password == null) {
-                return ResponseEntity.badRequest().body("Name, Email, and Password are required");
-            }
-
-            User created = receptionistService.createReceptionist(name, email, password);
-            return ResponseEntity.ok(created);
-        } catch (Exception e) {
-            return ResponseEntity.badRequest().body(e.getMessage());
+        if (name == null || email == null || password == null) {
+            return ResponseEntity.badRequest().body("Name, Email, and Password are required");
         }
+
+        // phone was previously dropped here — the admin form sends it, the API ignored it,
+        // and the receptionist row was saved with an empty phone while reporting success.
+        User created = receptionistService.createReceptionist(name, email, password, payload.get("phone"));
+        return ResponseEntity.ok(receptionistService.toView(created));
     }
 
     @GetMapping
@@ -58,11 +47,32 @@ public class ReceptionistController {
     @DeleteMapping("/{id}")
     public ResponseEntity<?> deleteReceptionist(@PathVariable String id,
             @RequestParam(required = false) String reason) {
-        try {
-            receptionistService.deleteReceptionist(id, reason);
-            return ResponseEntity.ok("Receptionist deleted successfully");
-        } catch (Exception e) {
-            return ResponseEntity.badRequest().body(e.getMessage());
+        receptionistService.deleteReceptionist(id, reason);
+        return ResponseEntity.ok("Receptionist deleted successfully");
+    }
+
+    @GetMapping("/{id}")
+    public ResponseEntity<?> getReceptionistById(@PathVariable String id) {
+        return ResponseEntity.ok(receptionistService.getReceptionistViewByPublicId(id));
+    }
+
+    @PutMapping("/{id}")
+    public ResponseEntity<?> updateReceptionist(@PathVariable String id, @RequestBody Map<String, String> payload) {
+        String name = payload.get("name");
+        if (name == null || name.trim().isEmpty()) {
+            return ResponseEntity.badRequest().body("Name is required");
         }
+        User updated = receptionistService.updateReceptionist(id, name, payload.get("phone"));
+        return ResponseEntity.ok(receptionistService.toView(updated));
+    }
+
+    @PostMapping("/{id}/reset-password")
+    public ResponseEntity<?> resetReceptionistPassword(@PathVariable String id, @RequestBody java.util.Map<String, String> body) {
+        String newPassword = body.get("newPassword");
+        if (newPassword == null || newPassword.trim().length() < 6) {
+            return ResponseEntity.badRequest().body("Password must be at least 6 characters");
+        }
+        receptionistService.resetReceptionistPassword(id, newPassword);
+        return ResponseEntity.ok(java.util.Map.of("message", "Password reset successfully"));
     }
 }

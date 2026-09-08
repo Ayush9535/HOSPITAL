@@ -14,6 +14,7 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
  * @author HMS Team
  * @version Phase-1
  */
+@org.springframework.scheduling.annotation.EnableScheduling
 @SpringBootApplication
 public class HospitalManagementSystemApplication {
 

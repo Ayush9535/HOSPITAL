@@ -1,368 +1,233 @@
-import React, { useState, useEffect, Fragment } from 'react';
-import { Tab } from '@headlessui/react';
-import { useToast } from '../../context/ToastContext';
+import React, { useState, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import Sidebar from '../../components/Sidebar';
 import Navbar from '../../components/Navbar';
+import ProfileModal from '../../components/ProfileModal';
+import Sidebar from '../../components/Sidebar';
+import { useToast } from '../../context/ToastContext';
+import useWebSocket from '../../hooks/useWebSocket';
 import authService from '../../services/authService';
-import PageHeader from '../../components/PageHeader';
-import DataTable from '../../components/DataTable';
-import hospitalService from '../../services/hospitalService';
-import { format } from 'date-fns';
-import {
-    createColumnHelper,
-    getCoreRowModel,
-    useReactTable,
-    getPaginationRowModel,
-    getSortedRowModel,
-    getFilteredRowModel,
-} from '@tanstack/react-table';
 
-// Helper for class names
-function classNames(...classes) {
-    return classes.filter(Boolean).join(' ');
-}
+// Module Views
+import BillingCounterView from './pharmacy/BillingCounterView';
+import BillingHistoryView from './pharmacy/BillingHistoryView';
+import BranchAuditLogsView from './pharmacy/BranchAuditLogsView';
+import BranchSettingsView from './pharmacy/BranchSettingsView';
+import DashboardView from './pharmacy/DashboardView';
+import ExpiryView from './pharmacy/ExpiryView';
+import InventoryView from './pharmacy/InventoryView';
+import ManufacturerMasterView from './pharmacy/ManufacturerMasterView';
+import PrescriptionsView from './pharmacy/PrescriptionsView';
+import PurchaseView from './pharmacy/PurchaseView';
+import ReportsView from './pharmacy/ReportsView';
+import ReturnsView from './pharmacy/ReturnsView';
+import SuppliersView from './pharmacy/SuppliersView';
 
 const PharmacyDashboard = () => {
-    const [user] = useState(authService.getCurrentUser());
-    const navigate = useNavigate();
-    const { success, error: toastError } = useToast();
-    const [loading, setLoading] = useState(true);
-    const [pendingPrescriptions, setPendingPrescriptions] = useState([]);
-    const [inventory, setInventory] = useState([]);
-    const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [user, setUser] = useState(authService.getCurrentUser());
+  const navigate = useNavigate();
+  const { success, error: toastError } = useToast();
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [profileOpen, setProfileOpen] = useState(false);
 
-    // Dispense Modal State
-    const [dispenseModal, setDispenseModal] = useState({
-        isOpen: false,
-        prescription: null,
-        stockAvailable: 0
-    });
+  // Navigation State for sub-modules
+  const [activeTab, setActiveTab] = useState('dashboard');
+  const [navData, setNavData] = useState(null);
+  const [refreshKey, setRefreshKey] = useState(0);
 
-    const handleLogout = () => {
-        authService.logout();
-        navigate('/login');
-    };
+  const handleRefresh = useCallback(() => setRefreshKey((k) => k + 1), []);
+  useWebSocket(user, setUser, handleRefresh);
 
-    const sidebarTabs = [
-        { id: 'pharmacy', label: 'Pharmacy', icon: null }
-    ];
+  const handleLogout = () => {
+    const loginUrl = authService.getLoginUrl();
+    authService.logout();
+    navigate(loginUrl);
+  };
 
-    useEffect(() => {
-        loadData();
-    }, []);
+  // Handle sidebar state toggle
+  const handleTabChange = (tabId) => {
+    setActiveTab(tabId);
+    setNavData(null); // Clear data when using sidebar
+  };
 
-    const loadData = async () => {
-        setLoading(true);
-        try {
-            const [pendingRes, inventoryRes] = await Promise.all([
-                hospitalService.getPendingPrescriptions(),
-                hospitalService.getInventory()
-            ]);
-            setPendingPrescriptions(pendingRes);
-            setInventory(inventoryRes);
-        } catch (error) {
-            console.error("Error loading pharmacy data", error);
-            toastError("Failed to load dashboard data");
-        } finally {
-            setLoading(false);
-        }
-    };
+  const handleNavigate = (tabId, data = null) => {
+    setActiveTab(tabId);
+    setNavData(data);
+  };
 
-    const handleOpenDispense = (prescription) => {
-        // Find stock for this medicine
-        // Note: Ideally backend should link ID, but we search by name for V1
-        const invItem = inventory.find(i => i.name.toLowerCase() === prescription.medicineName.toLowerCase());
-        const stock = invItem ? invItem.stockQuantity : 0;
+  const isStandalonePharmacy =
+    user?.modules?.includes('PHARMACY') && !user?.modules?.includes('OPD');
+  const selectedBranchId = sessionStorage.getItem('selectedBranchId');
+  const selectedBranchName = sessionStorage.getItem('selectedBranchName');
 
-        setDispenseModal({
-            isOpen: true,
-            prescription,
-            stockAvailable: stock,
-            invItem: invItem // Store full item for validation
-        });
-    };
+  // Flat Sidebar definition matching Receptionist/Doctor layouts to support clean minimalist icons
+  const sidebarTabs = [
+    { id: 'dashboard', label: 'Dashboard' },
+    { id: 'billing', label: 'Billing Counter' },
+    { id: 'billing-history', label: 'Billing' },
+    ...(!isStandalonePharmacy ? [{ id: 'prescriptions', label: 'Prescriptions' }] : []),
+    { id: 'inventory', label: 'Inventory' },
+    { id: 'purchase', label: 'Purchase Management' },
+    { id: 'suppliers', label: 'Suppliers' },
+    { id: 'manufacturers', label: 'Manufacturers' },
+    { id: 'returns', label: 'Returns & Refunds' },
+    { id: 'expiry', label: 'Expiry Management' },
+    { id: 'reports', label: 'Reports & Analytics' },
+    ...(user?.role === 'HOSPITAL_ADMIN'
+      ? [
+          { id: 'audit-logs', label: 'Audit Logs' },
+          { id: 'settings', label: 'Settings' },
+        ]
+      : []),
+  ];
 
-    const handleConfirmDispense = async () => {
-        if (!dispenseModal.prescription) return;
+  // Router-like rendering component based on selected state
+  const renderContent = () => {
+    switch (activeTab) {
+      case 'dashboard':
+        return <DashboardView onNavigate={handleNavigate} refreshKey={refreshKey} />;
 
-        try {
-            await hospitalService.dispenseMedicine(dispenseModal.prescription.id);
-            success("Medicine dispensed successfully");
-            setDispenseModal({ isOpen: false, prescription: null, stockAvailable: 0 });
-            loadData(); // Refresh list
-        } catch (error) {
-            console.error("Dispense failed", error);
-            toastError("Failed to dispense medicine");
-        }
-    };
+      case 'billing':
+        return <BillingCounterView initialData={navData} refreshKey={refreshKey} />;
 
-    // --- Tab Components ---
+      case 'billing-history':
+        return <BillingHistoryView refreshKey={refreshKey} />;
 
-    const PendingTab = () => {
-        if (loading) return <div>Loading prescriptions...</div>;
+      case 'prescriptions':
+        return <PrescriptionsView onNavigate={handleNavigate} refreshKey={refreshKey} />;
 
-        if (pendingPrescriptions.length === 0) {
-            return (
-                <div className="text-center py-10 bg-white rounded-lg border border-gray-200">
-                    <p className="text-gray-600 text-lg">No pending prescriptions to dispense.</p>
-                </div>
-            );
-        }
+      case 'inventory':
+        return <InventoryView onNavigate={handleNavigate} refreshKey={refreshKey} />;
 
+      case 'purchase':
+        return <PurchaseView refreshKey={refreshKey} />;
+
+      case 'suppliers':
+        return <SuppliersView refreshKey={refreshKey} />;
+      case 'manufacturers':
+        return <ManufacturerMasterView refreshKey={refreshKey} />;
+
+      case 'reports':
+        return <ReportsView refreshKey={refreshKey} />;
+
+      case 'expiry':
+        return <ExpiryView refreshKey={refreshKey} />;
+
+      case 'returns':
+        return <ReturnsView refreshKey={refreshKey} />;
+
+      case 'audit-logs':
+        return <BranchAuditLogsView refreshKey={refreshKey} />;
+
+      case 'settings':
+        return <BranchSettingsView refreshKey={refreshKey} />;
+
+      default:
         return (
-            <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
-                <table className="min-w-full divide-y divide-gray-200">
-                    <thead className="bg-gray-50">
-                        <tr>
-                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">Date</th>
-                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">Patient</th>
-                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">Medicine</th>
-                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">Details</th>
-                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">Doctor</th>
-                            <th className="px-6 py-3 text-right text-xs font-medium text-gray-600 uppercase tracking-wider">Action</th>
-                        </tr>
-                    </thead>
-                    <tbody className="bg-white divide-y divide-gray-200">
-                        {pendingPrescriptions.map((p) => (
-                            <tr key={p.id}>
-                                <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                                    {p.createdAt ? format(new Date(p.createdAt), 'dd MMM HH:mm') : '-'}
-                                </td>
-                                <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
-                                    {p.patientName || 'Unknown'}
-                                </td>
-                                <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900 font-semibold">
-                                    {p.medicineName}
-                                </td>
-                                <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-600">
-                                    {p.dosage} | {p.frequency} | {p.duration}
-                                </td>
-                                <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-600">
-                                    {p.doctorName || '-'}
-                                </td>
-                                <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
-                                    <button
-                                        onClick={() => handleOpenDispense(p)}
-                                        className="bg-gray-900 text-white px-3 py-1 rounded hover:bg-gray-800 transition"
-                                    >
-                                        Dispense
-                                    </button>
-                                </td>
-                            </tr>
-                        ))}
-                    </tbody>
-                </table>
-            </div>
+          <div className="flex flex-col items-center justify-center h-64 border-2 border-dashed border-gray-200 rounded-lg bg-gray-50 text-gray-400">
+            <svg
+              className="w-16 h-16 mb-2 opacity-40"
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={1}
+                d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4"
+              />
+            </svg>
+
+            <h3 className="font-bold text-gray-600 mb-1">Layout Component Pending</h3>
+
+            <p className="text-sm">
+              Feature implementation roadmap placeholder for:{' '}
+              {activeTab.replace('_', ' ').toUpperCase()}
+            </p>
+          </div>
         );
-    };
+    }
+  };
 
-    const InventoryTab = () => {
-        // Create column helper
-        const columnHelper = createColumnHelper();
+  return (
+    <div className="flex h-screen bg-white overflow-hidden">
+      {/* Modified Sidebar supporting groups */}
+      <Sidebar
+        title="HMS Portal"
+        tabs={sidebarTabs}
+        activeTab={activeTab}
+        onTabChange={handleTabChange}
+        footerTitle={selectedBranchId ? 'Branch Outlet' : 'Hospital'}
+        footerData={
+          selectedBranchId ? selectedBranchName : user?.hospitalName || 'HMS Medical Center'
+        }
+        variant="plain"
+        isCollapsed={sidebarCollapsed}
+      />
 
-        const columns = [
-            columnHelper.accessor('name', {
-                header: 'Medicine Name',
-                cell: info => <span className="font-medium text-gray-900">{info.getValue()}</span>,
-            }),
-            columnHelper.accessor('type', {
-                header: 'Type',
-            }),
-            columnHelper.accessor('stockQuantity', {
-                header: 'Stock',
-                cell: info => {
-                    const val = info.getValue();
-                    const min = info.row.original.minStockLevel || 10;
-                    const isLow = val <= min;
-                    return (
-                        <span className={`px-2 py-1 rounded-full text-xs font-medium ${isLow ? 'bg-gray-200 text-gray-800' : 'bg-gray-100 text-gray-700'}`}>
-                            {val} {isLow && 'Low'}
-                        </span>
-                    )
-                }
-            }),
-            columnHelper.accessor('unitPrice', {
-                header: 'Price (₹)',
-                cell: info => info.getValue()?.toFixed(2)
-            }),
-            columnHelper.accessor('expiryDate', {
-                header: 'Expiry',
-                cell: info => info.getValue() || '-'
-            }),
-            columnHelper.display({
-                id: 'actions',
-                header: 'Actions',
-                cell: info => (
-                    <button className="text-gray-600 hover:text-gray-900" onClick={() => toastError("Edit Stock Coming Soon")}>
-                        Edit
-                    </button>
-                ),
-            }),
-        ];
+      <div className="flex-1 flex flex-col h-full relative overflow-hidden">
+        <Navbar
+          title={
+            selectedBranchId ? `Branch: ${selectedBranchName}` : `Pharmacy & Inventory Operations`
+          }
+          user={user}
+          onLogout={handleLogout}
+          onProfile={() => setProfileOpen(true)}
+          onToggleSidebar={() => setSidebarCollapsed(!sidebarCollapsed)}
+        />
 
-        return (
-            <div className="bg-white rounded-lg border border-gray-200 p-4">
-                {loading ? <div>Loading Inventory...</div> :
-                    <DataTable
-                        data={inventory}
-                        columns={columns}
-                        searchPlaceholder="Search medicines..."
-                    />
-                }
+        {/* Main Dashboard Content Area */}
+        <main className="flex-1 overflow-x-hidden overflow-y-auto bg-[#fafafa] p-4 md:p-6">
+          {/* Impersonation Banner */}
+          {selectedBranchId && (
+            <div className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 mb-6 flex items-center justify-between shadow-sm">
+              <div className="flex items-center gap-2.5">
+                <span className="flex h-2.5 w-2.5 relative">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75"></span>
+                  <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-amber-500"></span>
+                </span>
+                <span className="text-xs font-semibold text-amber-800">
+                  Viewing branch:{' '}
+                  <strong className="font-bold text-amber-900">{selectedBranchName}</strong> (Admin
+                  Impersonation Mode)
+                </span>
+              </div>
+              <button
+                onClick={() => {
+                  sessionStorage.removeItem('selectedBranchId');
+                  sessionStorage.removeItem('selectedBranchName');
+                  navigate('/pharmacy/admin?tab=pharmacies');
+                }}
+                className="px-3.5 py-1.5 bg-amber-600 hover:bg-amber-700 text-white font-black text-[10px] uppercase tracking-wider rounded-lg transition-all shadow cursor-pointer"
+              >
+                Exit Branch
+              </button>
             </div>
-        );
-    };
+          )}
 
-    return (
-        <div className="flex h-screen bg-white">
-            <Sidebar
-                title="HMS Portal"
-                tabs={sidebarTabs}
-                activeTab="pharmacy"
-                onTabChange={() => { }}
-                footerTitle="Hospital"
-                footerData={user?.hospitalName}
-                variant="plain"
-                isCollapsed={sidebarCollapsed}
-            />
-            <div className="flex-1 flex flex-col overflow-hidden">
-                <Navbar
-                    title={`Pharmacy Dashboard - ${user?.name}`}
-                    user={user}
-                    onLogout={handleLogout}
-                    onToggleSidebar={() => setSidebarCollapsed(!sidebarCollapsed)}
-                />
-                <main className="flex-1 overflow-x-hidden overflow-y-auto bg-white p-6">
-                    <div className="space-y-6">
-                        <PageHeader
-                            title="Pharmacy & Inventory"
-                            subtitle="Dispense medicines and manage stock"
-                            actions={
-                                <button className="bg-gray-900 text-white px-4 py-2 rounded-lg hover:bg-gray-800" onClick={loadData}>
-                                    Refresh Data
-                                </button>
-                            }
-                        />
-
-                        <Tab.Group>
-                            <Tab.List className="flex space-x-1 rounded-lg bg-gray-100 p-1 max-w-md">
-                                <Tab
-                                    className={({ selected }) =>
-                                        classNames(
-                                            'w-full rounded-lg py-2.5 text-sm font-medium leading-5',
-                                            'focus:outline-none focus:ring-2 focus:ring-gray-500',
-                                            selected
-                                                ? 'bg-white text-gray-900 shadow'
-                                                : 'text-gray-600 hover:bg-white hover:text-gray-900'
-                                        )
-                                    }
-                                >
-                                    Pending Prescriptions
-                                </Tab>
-                                <Tab
-                                    className={({ selected }) =>
-                                        classNames(
-                                            'w-full rounded-lg py-2.5 text-sm font-medium leading-5',
-                                            'focus:outline-none focus:ring-2 focus:ring-gray-500',
-                                            selected
-                                                ? 'bg-white text-gray-900 shadow'
-                                                : 'text-gray-600 hover:bg-white hover:text-gray-900'
-                                        )
-                                    }
-                                >
-                                    Inventory Management
-                                </Tab>
-                            </Tab.List>
-                            <Tab.Panels className="mt-2">
-                                <Tab.Panel className={classNames('rounded-lg bg-white p-3', 'focus:outline-none focus:ring-2 focus:ring-gray-500')}>
-                                    <PendingTab />
-                                </Tab.Panel>
-                                <Tab.Panel className={classNames('rounded-lg bg-white p-3', 'focus:outline-none focus:ring-2 focus:ring-gray-500')}>
-                                    <InventoryTab />
-                                </Tab.Panel>
-                            </Tab.Panels>
-                        </Tab.Group>
-
-                        {/* Dispense Modal */}
-                        {dispenseModal.isOpen && (
-                            <div className="fixed inset-0 z-50 overflow-y-auto">
-                                <div className="flex items-center justify-center min-h-screen pt-4 px-4 pb-20 text-center sm:block sm:p-0">
-                                    <div className="fixed inset-0 transition-opacity" aria-hidden="true">
-                                        <div className="absolute inset-0 bg-gray-500 opacity-75" onClick={() => setDispenseModal({ ...dispenseModal, isOpen: false })}></div>
-                                    </div>
-                                    <span className="hidden sm:inline-block sm:align-middle sm:h-screen" aria-hidden="true">&#8203;</span>
-                                    <div className="inline-block align-bottom bg-white rounded-lg text-left overflow-hidden shadow-xl transform transition-all sm:my-8 sm:align-middle sm:max-w-lg sm:w-full">
-                                        <div className="bg-white px-4 pt-5 pb-4 sm:p-6 sm:pb-4">
-                                            <div className="sm:flex sm:items-start">
-                                                <div className="mx-auto flex-shrink-0 flex items-center justify-center h-12 w-12 rounded-full bg-gray-100 sm:mx-0 sm:h-10 sm:w-10">
-                                                </div>
-                                                <div className="mt-3 text-center sm:mt-0 sm:ml-4 sm:text-left w-full">
-                                                    <h3 className="text-lg leading-6 font-medium text-gray-900">
-                                                        Dispense Medicine
-                                                    </h3>
-                                                    <div className="mt-4 space-y-3">
-                                                        <div className="bg-gray-50 p-3 rounded text-sm">
-                                                            <p className="text-gray-500">Patient</p>
-                                                            <p className="font-semibold text-gray-900">{dispenseModal.prescription?.patientName}</p>
-                                                        </div>
-                                                        <div className="bg-gray-50 p-3 rounded border border-gray-200">
-                                                            <p className="text-sm text-gray-600 font-medium">Prescribed Item</p>
-                                                            <p className="text-lg font-bold text-gray-900">{dispenseModal.prescription?.medicineName}</p>
-                                                            <p className="text-sm text-gray-600">
-                                                                {dispenseModal.prescription?.dosage} • {dispenseModal.prescription?.duration}
-                                                            </p>
-                                                        </div>
-
-                                                        <div className="grid grid-cols-2 gap-4">
-                                                            <div className="border p-2 rounded">
-                                                                <span className="block text-xs text-gray-500">Required Qty</span>
-                                                                {/* V1: Hardcoded 1 unit deduction or estimated */}
-                                                                <span className="text-xl font-bold">1 Unit</span>
-                                                            </div>
-                                                            <div className={`border p-2 rounded ${dispenseModal.stockAvailable < 1 ? 'bg-gray-100 border-gray-300' : 'bg-gray-50 border-gray-200'}`}>
-                                                                <span className="block text-xs text-gray-600">Available Stock</span>
-                                                                <span className={`text-xl font-bold ${dispenseModal.stockAvailable < 1 ? 'text-gray-700' : 'text-gray-900'}`}>
-                                                                    {dispenseModal.stockAvailable}
-                                                                </span>
-                                                            </div>
-                                                        </div>
-
-                                                        {dispenseModal.stockAvailable < 1 && (
-                                                            <div className="text-gray-700 text-sm font-medium bg-gray-100 p-2 rounded">
-                                                                Insufficient Stock. Cannot dispense.
-                                                            </div>
-                                                        )}
-                                                    </div>
-                                                </div>
-                                            </div>
-                                        </div>
-                                        <div className="bg-gray-50 px-4 py-3 sm:px-6 sm:flex sm:flex-row-reverse">
-                                            <button
-                                                type="button"
-                                                disabled={dispenseModal.stockAvailable < 1}
-                                                onClick={handleConfirmDispense}
-                                                className={`w-full inline-flex justify-center rounded-md border border-transparent shadow-sm px-4 py-2 text-base font-medium text-white sm:ml-3 sm:w-auto sm:text-sm 
-                                            ${dispenseModal.stockAvailable < 1 ? 'bg-gray-400 cursor-not-allowed' : 'bg-gray-900 hover:bg-gray-800'}`}
-                                            >
-                                                Confirm Dispense
-                                            </button>
-                                            <button
-                                                type="button"
-                                                onClick={() => setDispenseModal({ ...dispenseModal, isOpen: false })}
-                                                className="mt-3 w-full inline-flex justify-center rounded-md border border-gray-300 shadow-sm px-4 py-2 bg-white text-base font-medium text-gray-700 hover:bg-gray-50 sm:mt-0 sm:ml-3 sm:w-auto sm:text-sm"
-                                            >
-                                                Cancel
-                                            </button>
-                                        </div>
-                                    </div>
-                                </div>
-                            </div>
-                        )}
-                    </div>
-                </main>
+          {/* Page Title Bar */}
+          <div className="flex items-center justify-between mb-6">
+            <div className="flex items-center gap-3">
+              <div className="w-1 h-6 bg-gray-900 rounded-full"></div>
+              <h2 className="text-lg font-bold text-gray-800 capitalize flex items-center gap-2">
+                {activeTab.replace('-', ' ')}
+              </h2>
             </div>
-        </div>
-    );
+            <div className="flex items-center gap-2 text-xs font-medium text-gray-500 bg-white px-3 py-1.5 rounded border border-gray-200">
+              <span className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></span>
+              Live Status
+            </div>
+          </div>
+
+          {/* Dynamic Content Injector */}
+          {renderContent()}
+        </main>
+      </div>
+
+      {/* Profile Settings Modal */}
+      <ProfileModal isOpen={profileOpen} onClose={() => setProfileOpen(false)} />
+    </div>
+  );
 };
+
 export default PharmacyDashboard;

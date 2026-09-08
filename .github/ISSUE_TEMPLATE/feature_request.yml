@@ -1,0 +1,60 @@
+name: "✨ Feature Request"
+description: Propose a new capability or improvement
+title: "feat: <short summary>"
+labels: ["type: feature", "status: triage"]
+body:
+  - type: markdown
+    attributes:
+      value: Thanks for the idea. Please describe the problem first, then the proposed solution.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem / motivation
+      description: What user or business problem does this solve? Who is affected?
+      placeholder: As a <role>, I need <capability> so that <outcome>.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: What should happen? Include UI/UX or API sketches if relevant.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Affected area
+      options:
+        - Backend / API
+        - Frontend / UI
+        - OPD
+        - IPD
+        - Pharmacy
+        - Nursing
+        - OT
+        - Billing
+        - Platform / multi-tenant
+        - DevOps / CI-CD
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Other approaches you weighed and why you rejected them.
+
+  - type: checkboxes
+    id: considerations
+    attributes:
+      label: Considerations
+      options:
+        - label: This affects multiple tenants / hospitals
+        - label: This touches patient data (PHI) and has compliance implications
+        - label: This requires a database schema change
+        - label: This is a breaking change to an existing API

@@ -1,0 +1,124 @@
+# ────────────────────────────────────────────
+# Build and Test — Hospital Management System
+# ────────────────────────────────────────────
+
+name: Build & Test
+
+on:
+  push:
+    branches-ignore:
+      - main
+      - staging
+    tags:
+      - 'v*'
+  pull_request:
+    branches:
+      - main
+      - staging
+  workflow_dispatch:
+
+concurrency:
+  group: build-test-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  checks: write
+  pull-requests: write
+
+jobs:
+  # ── Check secrets presence — gates jobs needing keys (like Sonar) ─────────
+  check-secrets:
+    name: Check secrets presence
+    runs-on: ubuntu-latest
+    outputs:
+      has_sonar_token: ${{ steps.check.outputs.has_sonar_token }}
+    steps:
+      - name: Check Sonar Token
+        id: check
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_VAR: ${{ vars.SONAR_TOKEN }}
+          SONAR_ORG: ${{ vars.SONAR_ORGANIZATION }}
+          SONAR_KEY: ${{ vars.SONAR_PROJECT_KEY }}
+        run: |
+          if { [ -n "$SONAR_TOKEN" ] || [ -n "$SONAR_VAR" ]; } && [ -n "$SONAR_ORG" ] && [ -n "$SONAR_KEY" ]; then
+            echo "has_sonar_token=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_sonar_token=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  # ── Frontend build, type-check, coverage ────────────────────────────────
+  build-frontend:
+    uses: ./.github/workflows/_build-frontend.yml
+    with:
+      node-version: ${{ vars.NODE_VERSION || '22' }}
+      vite-api-base-url: ${{ github.ref == 'refs/heads/main' && vars.PROD_API_BASE_URL || vars.STAGE_API_BASE_URL }}
+
+  # ── Backend compile, test (JaCoCo), package ──────────────────────────────
+  build-backend:
+    uses: ./.github/workflows/_build-backend.yml
+    permissions:
+      contents: read
+      checks: write
+      pull-requests: write
+    with:
+      java-version: ${{ vars.JAVA_VERSION || '17' }}
+
+  # ── SonarCloud quality gate ───────────────────────────────────────────────
+  sonar:
+    name: Quality — SonarCloud Analysis & Gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: [build-frontend, build-backend, check-secrets]
+    if: >
+      (github.event_name == 'push' ||
+       (github.event_name == 'pull_request' &&
+        github.event.pull_request.head.repo.full_name == github.repository)) &&
+      needs.check-secrets.outputs.has_sonar_token == 'true'
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Setup Java
+        uses: ./.github/actions/setup-java
+        with:
+          java-version: ${{ vars.JAVA_VERSION || '17' }}
+      - name: Compile backend (bytecode for Sonar)
+        run: mvn test-compile -q -f backend/pom.xml
+      - name: Download JaCoCo coverage report
+        uses: actions/download-artifact@v4
+        with:
+          name: jacoco-xml-${{ github.sha }}
+          path: backend/target/site/jacoco/
+      - name: Download frontend LCOV coverage report
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-coverage-${{ github.sha }}
+          path: frontend/coverage/
+        continue-on-error: true
+      - name: Run SonarCloud analysis
+        uses: sonarsource/sonarqube-scan-action@v6
+        continue-on-error: true
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN || vars.SONAR_TOKEN }}
+          SONAR_HOST_URL: https://sonarcloud.io
+        with:
+          args: >
+            -Dsonar.organization=${{ vars.SONAR_ORGANIZATION }}
+            -Dsonar.projectKey=${{ vars.SONAR_PROJECT_KEY }}
+            -Dsonar.sources=backend/src/main/java,frontend/src
+            -Dsonar.tests=backend/src/test/java
+            -Dsonar.java.binaries=backend/target/classes
+            -Dsonar.java.source=${{ vars.JAVA_VERSION || '17' }}
+            -Dsonar.coverage.jacoco.xmlReportPaths=backend/target/site/jacoco/jacoco.xml
+            -Dsonar.javascript.lcov.reportPaths=frontend/coverage/lcov.info
+            -Dsonar.exclusions=**/node_modules/**,**/dist/**,**/target/surefire-reports/**,**/*.min.js,**/*.backup,**/frontend/src/pages/**,**/frontend/src/utils/printHtml.js
+            -Dsonar.coverage.exclusions=**/*
+            -Dsonar.cpd.exclusions=**/dto/**,**/entity/**,**/config/**,**/*Application.java
+            -Dsonar.sourceEncoding=UTF-8
+            -Dsonar.qualitygate.wait=${{ vars.SONAR_QUALITY_GATE_WAIT || 'true' }}
+            -Dsonar.jasmin.internal.disabled=true

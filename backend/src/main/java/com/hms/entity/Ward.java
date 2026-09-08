@@ -33,6 +33,19 @@ public class Ward {
     @Column(name = "floor_number")
     private Integer floorNumber;
 
+    @Column(name = "incharge_nurse_id")
+    private Long inchargeNurseId;
+
+    /**
+     * Ward classification from {@code CareUnitRegistry} — GENERAL, ICU, MICU, SICU, NICU,
+     * PICU, CCU or HDU (ICU Phase 2). Defaults to GENERAL so every pre-existing ward keeps
+     * behaving exactly as before. The ward's NAME stays free text; this is what the ICU board
+     * filters on, so a unit is never identified by a substring of its name.
+     */
+    @Column(name = "unit_type", nullable = false, length = 20,
+            columnDefinition = "VARCHAR(20) NOT NULL DEFAULT 'GENERAL'")
+    private String unitType = "GENERAL";
+
     @Column(name = "created_at", updatable = false)
     private LocalDateTime createdAt;
 

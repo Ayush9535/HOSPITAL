@@ -8,7 +8,7 @@
     <parent>
         <groupId>org.springframework.boot</groupId>
         <artifactId>spring-boot-starter-parent</artifactId>
-        <version>3.2.0</version>
+        <version>3.3.5</version>
         <relativePath/>
     </parent>
     
@@ -27,6 +27,12 @@
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-web</artifactId>
+        </dependency>
+        
+        <!-- Spring Boot WebSocket -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-websocket</artifactId>
         </dependency>
         
         <!-- Spring Boot Data JPA -->
@@ -53,6 +59,25 @@
             <artifactId>mysql-connector-j</artifactId>
             <scope>runtime</scope>
         </dependency>
+
+        <!-- Flyway — versioned, auditable schema migrations (staging/prod only; disabled in
+             dev/test via spring.flyway.enabled=false). Version managed by the Spring Boot BOM.
+             See docs/database/DATABASE_MIGRATIONS.md. -->
+        <dependency>
+            <groupId>org.flywaydb</groupId>
+            <artifactId>flyway-core</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.flywaydb</groupId>
+            <artifactId>flyway-mysql</artifactId>
+        </dependency>
+
+        <!-- .env file loader -->
+        <dependency>
+            <groupId>me.paulschwarz</groupId>
+            <artifactId>spring-dotenv</artifactId>
+            <version>4.0.0</version>
+        </dependency>
         
         <!-- JWT -->
         <dependency>
@@ -77,7 +102,7 @@
         <dependency>
     <groupId>org.projectlombok</groupId>
     <artifactId>lombok</artifactId>
-    <version>1.18.32</version>
+    <version>1.18.36</version>
     <scope>provided</scope>
 </dependency>
 
@@ -94,23 +119,88 @@
             <artifactId>openpdf</artifactId>
             <version>1.3.30</version>
         </dependency>
-        <!-- Thymeleaf (Spring 6 / Boot 3) -->
-        <dependency>
-            <groupId>org.thymeleaf</groupId>
-            <artifactId>thymeleaf-spring6</artifactId>
-        </dependency>
-        <!-- Thymeleaf core (ensure IContext is available) -->
-        <dependency>
-            <groupId>org.thymeleaf</groupId>
-            <artifactId>thymeleaf</artifactId>
-            <version>3.1.1.RELEASE</version>
-        </dependency>
 
         <!-- OpenHTMLToPDF (renders HTML -> PDF) -->
         <dependency>
             <groupId>com.openhtmltopdf</groupId>
             <artifactId>openhtmltopdf-pdfbox</artifactId>
             <version>1.0.10</version>
+        </dependency>
+        <!-- Test -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.security</groupId>
+            <artifactId>spring-security-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!-- In-memory DB (MySQL compatibility mode) so the full Spring context can be
+             booted in CI without a live MySQL — see ApplicationContextLoadTest. -->
+        <dependency>
+            <groupId>com.h2database</groupId>
+            <artifactId>h2</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!-- Architecture tests: enforce that new repository lookups-by-id are reviewed for
+             tenant scoping (TenantScopingArchTest). -->
+        <dependency>
+            <groupId>com.tngtech.archunit</groupId>
+            <artifactId>archunit</artifactId>
+            <version>1.3.0</version>
+            <scope>test</scope>
+        </dependency>
+        <!-- Testcontainers — real-MySQL integration tests (*IT.java, run by Failsafe).
+             Needs Docker (available on GitHub runners; skipped locally if Docker absent). -->
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <version>1.20.4</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>mysql</artifactId>
+            <version>1.20.4</version>
+            <scope>test</scope>
+        </dependency>
+        <!-- Rate Limiting -->
+        <dependency>
+            <groupId>com.bucket4j</groupId>
+            <artifactId>bucket4j-core</artifactId>
+            <version>8.10.1</version>
+        </dependency>
+
+        <!-- Actuator (health checks) -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
+
+        <!-- Observability — Micrometer → Prometheus. Exposes /actuator/prometheus with JVM, HTTP
+             (latency/error rate), HikariCP, Tomcat and Flyway metrics. Version managed by the
+             Spring Boot BOM. See docs/monitoring/OBSERVABILITY.md. -->
+        <dependency>
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-registry-prometheus</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+
+        <!-- Redis & Caching Dependencies -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-redis</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-cache</artifactId>
+        </dependency>
+        <!-- Jackson Datatype Hibernate for Lazy Loading serialization -->
+        <dependency>
+            <groupId>com.fasterxml.jackson.datatype</groupId>
+            <artifactId>jackson-datatype-hibernate6</artifactId>
         </dependency>
     </dependencies>
     
@@ -129,16 +219,236 @@
                     <path>
                         <groupId>org.projectlombok</groupId>
                         <artifactId>lombok</artifactId>
-                        <version>1.18.32</version>
+                        <version>1.18.36</version>
                     </path>
                 </annotationProcessorPaths>
             </configuration>
         </plugin>
 
-        <!-- Spring Boot plugin (NO compiler config here) -->
+        <!-- Spring Boot plugin (NO compiler config here).
+             build-info goal writes META-INF/build-info.properties into the JAR; Spring Boot
+             auto-exposes it at the (already public) /actuator/info endpoint as `build.*`.
+             See docs/release/RELEASE_ENGINEERING.md §Build metadata. -->
         <plugin>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-maven-plugin</artifactId>
+            <executions>
+                <execution>
+                    <id>build-info</id>
+                    <goals>
+                        <goal>build-info</goal>
+                    </goals>
+                </execution>
+            </executions>
+        </plugin>
+
+        <!-- Git metadata → git.properties in the JAR; Spring Boot exposes it at /actuator/info
+             as `git.*` (commit id, branch, build time). Never fails the build if .git is
+             absent (e.g. building from an exported tarball). -->
+        <plugin>
+            <groupId>io.github.git-commit-id</groupId>
+            <artifactId>git-commit-id-maven-plugin</artifactId>
+            <version>9.0.1</version>
+            <executions>
+                <execution>
+                    <id>get-the-git-infos</id>
+                    <goals>
+                        <goal>revision</goal>
+                    </goals>
+                    <phase>initialize</phase>
+                </execution>
+            </executions>
+            <configuration>
+                <failOnNoGitDirectory>false</failOnNoGitDirectory>
+                <failOnUnableToExtractRepoInfo>false</failOnUnableToExtractRepoInfo>
+                <generateGitPropertiesFile>true</generateGitPropertiesFile>
+                <includeOnlyProperties>
+                    <property>^git.branch$</property>
+                    <property>^git.build.time$</property>
+                    <property>^git.commit.id.full$</property>
+                    <property>^git.commit.id.abbrev$</property>
+                    <property>^git.commit.time$</property>
+                    <property>^git.tags$</property>
+                    <property>^git.closest.tag.name$</property>
+                    <property>^git.dirty$</property>
+                </includeOnlyProperties>
+            </configuration>
+        </plugin>
+
+        <!-- CycloneDX SBOM — emits target/bom.json + target/bom.xml on every `package`.
+             Enterprise supply-chain requirement: every build produces a Software Bill of
+             Materials. See docs/security/SUPPLY_CHAIN.md. -->
+        <plugin>
+            <groupId>org.cyclonedx</groupId>
+            <artifactId>cyclonedx-maven-plugin</artifactId>
+            <version>2.9.1</version>
+            <executions>
+                <execution>
+                    <id>build-sbom</id>
+                    <phase>package</phase>
+                    <goals>
+                        <goal>makeAggregateBom</goal>
+                    </goals>
+                </execution>
+            </executions>
+            <configuration>
+                <projectType>application</projectType>
+                <schemaVersion>1.5</schemaVersion>
+                <outputFormat>all</outputFormat>
+                <outputName>bom</outputName>
+                <includeBomSerialNumber>true</includeBomSerialNumber>
+                <includeLicenseText>false</includeLicenseText>
+                <!-- Don't fail the build if SBOM generation hiccups; the build must stay green. -->
+                <skipNotDeployed>false</skipNotDeployed>
+            </configuration>
+        </plugin>
+
+        <!-- Failsafe plugin for integration tests -->
+        <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-failsafe-plugin</artifactId>
+            <executions>
+                <execution>
+                    <goals>
+                        <goal>integration-test</goal>
+                        <goal>verify</goal>
+                    </goals>
+                </execution>
+            </executions>
+        </plugin>
+
+        <!--
+          Spotless — Java code formatting (Palantir style; JDK 17 friendly).
+          Deliberately NOT bound to a build phase, so `mvn compile/test/verify` never
+          fail on formatting. Invoke explicitly:
+              mvn spotless:apply    (format)   /   mvn spotless:check   (verify)
+          ratchetFrom=origin/main limits it to files changed since main, so it never
+          reformats the whole legacy codebase. Wiring it into hooks/CI is a later phase.
+        -->
+        <plugin>
+            <groupId>com.diffplug.spotless</groupId>
+            <artifactId>spotless-maven-plugin</artifactId>
+            <version>2.43.0</version>
+            <configuration>
+                <ratchetFrom>origin/main</ratchetFrom>
+                <java>
+                    <palantirJavaFormat>
+                        <version>2.50.0</version>
+                    </palantirJavaFormat>
+                    <removeUnusedImports/>
+                    <trimTrailingWhitespace/>
+                    <endWithNewline/>
+                </java>
+            </configuration>
+        </plugin>
+
+        <!--
+          JaCoCo — code coverage. Runs on every build (agent@test, report@test) and
+          ENFORCES a floor at `verify` (check@verify). The floor is set below current
+          coverage so it prevents backsliding without breaking the build; the real bar
+          (80% on NEW code) is enforced by the SonarCloud quality gate. See
+          docs/quality/CODE_QUALITY.md for thresholds and the coverage strategy.
+        -->
+        <plugin>
+            <groupId>org.jacoco</groupId>
+            <artifactId>jacoco-maven-plugin</artifactId>
+            <version>0.8.12</version>
+            <executions>
+                <execution>
+                    <id>jacoco-prepare-agent</id>
+                    <goals><goal>prepare-agent</goal></goals>
+                </execution>
+                <execution>
+                    <id>jacoco-report</id>
+                    <phase>test</phase>
+                    <goals><goal>report</goal></goals>
+                </execution>
+                <execution>
+                    <id>jacoco-check</id>
+                    <phase>verify</phase>
+                    <goals><goal>check</goal></goals>
+                    <configuration>
+                        <rules>
+                            <rule>
+                                <element>BUNDLE</element>
+                                <limits>
+                                    <!-- Regression floor (current ~25.7% line / ~17% branch). -->
+                                    <limit>
+                                        <counter>LINE</counter>
+                                        <value>COVEREDRATIO</value>
+                                        <minimum>0.20</minimum>
+                                    </limit>
+                                    <limit>
+                                        <counter>BRANCH</counter>
+                                        <value>COVEREDRATIO</value>
+                                        <minimum>0.10</minimum>
+                                    </limit>
+                                </limits>
+                            </rule>
+                        </rules>
+                    </configuration>
+                </execution>
+            </executions>
+        </plugin>
+
+        <!--
+          Checkstyle / SpotBugs / PMD — supplementary Java static analysis. Configured but
+          NOT bound to the lifecycle (so `mvn verify` never fails on them) and REPORT-ONLY
+          (failOnViolation/failOnError=false). Run via the `quality` CI job or locally:
+              mvn checkstyle:check    spotbugs:check    pmd:check
+          SonarCloud remains the primary, ENFORCED gate; these add defense-in-depth +
+          offline/local analysis. See docs/quality/CODE_QUALITY.md.
+        -->
+        <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-checkstyle-plugin</artifactId>
+            <version>3.5.0</version>
+            <dependencies>
+                <dependency>
+                    <groupId>com.puppycrawl.tools</groupId>
+                    <artifactId>checkstyle</artifactId>
+                    <version>10.18.2</version>
+                </dependency>
+            </dependencies>
+            <configuration>
+                <configLocation>config/checkstyle.xml</configLocation>
+                <includeTestSourceDirectory>false</includeTestSourceDirectory>
+                <failOnViolation>false</failOnViolation>
+                <consoleOutput>true</consoleOutput>
+            </configuration>
+        </plugin>
+
+        <plugin>
+            <groupId>com.github.spotbugs</groupId>
+            <artifactId>spotbugs-maven-plugin</artifactId>
+            <version>4.8.6.4</version>
+            <configuration>
+                <effort>Max</effort>
+                <threshold>Medium</threshold>
+                <excludeFilterFile>config/spotbugs-exclude.xml</excludeFilterFile>
+                <failOnError>false</failOnError>
+                <plugins>
+                    <plugin>
+                        <groupId>com.h3xstream.findsecbugs</groupId>
+                        <artifactId>findsecbugs-plugin</artifactId>
+                        <version>1.13.0</version>
+                    </plugin>
+                </plugins>
+            </configuration>
+        </plugin>
+
+        <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-pmd-plugin</artifactId>
+            <version>3.25.0</version>
+            <configuration>
+                <rulesets>
+                    <ruleset>config/pmd-ruleset.xml</ruleset>
+                </rulesets>
+                <includeTests>false</includeTests>
+                <failOnViolation>false</failOnViolation>
+                <printFailingErrors>true</printFailingErrors>
+            </configuration>
         </plugin>
 
     </plugins>

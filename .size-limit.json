@@ -1,0 +1,14 @@
+[
+  {
+    "name": "Frontend JS bundle (gzip)",
+    "path": "frontend/dist/assets/*.js",
+    "limit": "900 kB",
+    "gzip": true
+  },
+  {
+    "name": "Frontend CSS (gzip)",
+    "path": "frontend/dist/assets/*.css",
+    "limit": "120 kB",
+    "gzip": true
+  }
+]

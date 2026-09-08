@@ -59,6 +59,10 @@ public class Appointment {
     @Column(name = "custom_id")
     private String customId;
 
+    // Reused across inserts — creating a new Random (or seeding one) per call is
+    // both wasteful and a reliability smell. SecureRandom avoids predictable IDs.
+    private static final java.security.SecureRandom ID_RANDOM = new java.security.SecureRandom();
+
     @PrePersist
     public void generateIds() {
         if (this.publicId == null) {
@@ -66,7 +70,7 @@ public class Appointment {
         }
         if (this.customId == null) {
             // Generate simple random readable ID: APT + 4 random digits
-            this.customId = "APT" + (1000 + new java.util.Random().nextInt(9000));
+            this.customId = "APT" + (1000 + ID_RANDOM.nextInt(9000));
         }
     }
 
@@ -113,6 +117,8 @@ public class Appointment {
      * Additional notes or reason for visit
      */
     @Column(length = 500)
+    @jakarta.validation.constraints.Size(max = 500, message = "Notes is too long")
+    @com.hms.validation.NoEmoji
     private String notes;
 
     /**
@@ -134,35 +140,47 @@ public class Appointment {
      * Patient name for new patient creation (not stored in appointments table)
      */
     @Transient
+    @jakarta.validation.constraints.Size(max = 150, message = "Patient name is too long")
+    @com.hms.validation.NoEmoji
     private String patientName;
 
     /**
      * Patient phone for new patient creation (not stored in appointments table)
      */
     @Transient
+    @jakarta.validation.constraints.Pattern(regexp = "^(\\d{10})?$", message = "Phone number must be exactly 10 digits")
     private String patientPhone;
 
     /**
      * Patient email for new patient creation (not stored in appointments table)
      */
     @Transient
+    @jakarta.validation.constraints.Email(message = "Invalid email format")
+    @jakarta.validation.constraints.Size(max = 100, message = "Email is too long")
     private String patientEmail;
 
     /**
-     * Patient age for new patient creation (not stored in appointments table)
+     * Patient date of birth for new patient creation (not stored in
+     * appointments table). See Patient.dateOfBirth for why Patient itself
+     * computes age instead of storing it.
      */
+    @JsonFormat(pattern = "yyyy-MM-dd")
     @Transient
-    private Integer patientAge;
+    private LocalDate patientDateOfBirth;
 
     /**
      * Patient gender for new patient creation (not stored in appointments table)
      */
     @Transient
+    @jakarta.validation.constraints.Size(max = 20, message = "Gender is too long")
+    @com.hms.validation.NoEmoji
     private String patientGender;
 
     /**
      * Doctor name for display purposes (populated by service)
      */
     @Transient
+    @jakarta.validation.constraints.Size(max = 100, message = "Doctor name is too long")
+    @com.hms.validation.NoEmoji
     private String doctorName;
 }

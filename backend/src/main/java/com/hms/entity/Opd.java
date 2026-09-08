@@ -16,15 +16,15 @@ public class Opd {
     @Column(name = "case_id", unique = true)
     private String caseId;
 
-    @ManyToOne
+    @ManyToOne(fetch = jakarta.persistence.FetchType.LAZY)
     @JoinColumn(name = "patient_id")
     private Patient patient;
 
-    @ManyToOne
+    @ManyToOne(fetch = jakarta.persistence.FetchType.LAZY)
     @JoinColumn(name = "receptionist_id")
     private User receptionist;
 
-    @ManyToOne
+    @ManyToOne(fetch = jakarta.persistence.FetchType.LAZY)
     @JoinColumn(name = "doctor_id")
     private Doctor doctor;
 
@@ -41,8 +41,16 @@ public class Opd {
     @Column(name = "weight")
     private Double weight;
 
+    /** Height in cm, captured with the OPD vitals. */
+    @Column(name = "height")
+    private Double height;
+
     @Column(name = "spo2")
     private Integer spo2;
+
+    /** JSON map of hospital-defined custom vitals, keyed by vital_key. e.g. {"GRBS":"110"} */
+    @Column(name = "custom_vitals", columnDefinition = "text")
+    private String customVitals;
 
     @Column(name = "problem", columnDefinition = "text")
     private String problem;
@@ -51,14 +59,25 @@ public class Opd {
     @Column(name = "visit_type")
     private VisitType visitType;
 
-    @Column(name = "token_number")
-    private Integer tokenNumber;
-
+    /**
+     * The clinical state of the OPD case — never its payment state (a bill can be paid before the
+     * doctor is even seen; see hospital_settings.bill_payment_timing).
+     *
+     *  QUEUED    — case created, patient waiting for the doctor. Shown as "In Queue".
+     *  COMPLETED — the doctor finished the consultation. Set by DoctorService, not by payment.
+     *  IN_IPD    — the case was admitted and continues as an IPD admission.
+     *  CONSULTED — LEGACY. Nothing writes it. It used to mean "doctor done, bill not yet collected",
+     *              back when payment was what marked a case COMPLETED. Kept only so old rows still
+     *              deserialise; DatabaseMigrationRunner promotes them to COMPLETED on boot.
+     */
     public enum Status { QUEUED, CONSULTED, COMPLETED, IN_IPD }
 
     @Enumerated(EnumType.STRING)
     @Column(name = "status", nullable = false)
     private Status status = Status.QUEUED;
+
+    @Column(name = "ipd_admit_recommended", nullable = false)
+    private Boolean ipdAdmitRecommended = false;
 
     @Column(name = "created_at")
     private LocalDateTime createdAt;
@@ -92,10 +111,14 @@ public class Opd {
     public void setProblem(String problem) { this.problem = problem; }
     public VisitType getVisitType() { return visitType; }
     public void setVisitType(VisitType visitType) { this.visitType = visitType; }
-    public Integer getTokenNumber() { return tokenNumber; }
-    public void setTokenNumber(Integer tokenNumber) { this.tokenNumber = tokenNumber; }
     public LocalDateTime getCreatedAt() { return createdAt; }
     public void setCreatedAt(LocalDateTime createdAt) { this.createdAt = createdAt; }
     public Status getStatus() { return status; }
     public void setStatus(Status status) { this.status = status; }
+    public Boolean getIpdAdmitRecommended() { return ipdAdmitRecommended; }
+    public void setIpdAdmitRecommended(Boolean ipdAdmitRecommended) { this.ipdAdmitRecommended = ipdAdmitRecommended; }
+    public Double getHeight() { return height; }
+    public void setHeight(Double height) { this.height = height; }
+    public String getCustomVitals() { return customVitals; }
+    public void setCustomVitals(String customVitals) { this.customVitals = customVitals; }
 }

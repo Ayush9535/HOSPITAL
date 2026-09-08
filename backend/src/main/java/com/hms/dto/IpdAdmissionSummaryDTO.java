@@ -13,6 +13,10 @@ public class IpdAdmissionSummaryDTO {
     private String doctorName;
     private LocalDateTime admissionDateTime;
     private String status;
+    private Boolean admissionConfirmed;
+
+    public Boolean getAdmissionConfirmed() { return admissionConfirmed; }
+    public void setAdmissionConfirmed(Boolean admissionConfirmed) { this.admissionConfirmed = admissionConfirmed; }
 
     public Long getIpdId() { return ipdId; }
     public void setIpdId(Long ipdId) { this.ipdId = ipdId; }

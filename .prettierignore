@@ -1,0 +1,13 @@
+# Build outputs & deps
+**/node_modules/
+**/dist/
+**/coverage/
+**/target/
+**/build/
+# Lockfiles & minified
+package-lock.json
+**/*.min.js
+# Backend Java is formatted by Spotless, not Prettier
+backend/
+# Generated / vendor
+frontend/public/

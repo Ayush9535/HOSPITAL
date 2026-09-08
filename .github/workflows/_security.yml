@@ -1,0 +1,332 @@
+name: Security Scans
+
+on:
+  workflow_call:
+    inputs:
+      node-version:
+        type: string
+        default: '22'
+      java-version:
+        type: string
+        default: '17'
+    secrets:
+      nvd_api_key:
+        required: false
+
+jobs:
+  # ── 1. CodeQL static analysis ─────────────────────────────────────────────
+  codeql:
+    name: CodeQL (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: java-kotlin
+            needs-java: true
+          - language: javascript-typescript
+            needs-java: false
+
+    steps:
+      # Pin to SHA in production: https://github.com/actions/checkout/releases
+      - uses: actions/checkout@v4
+
+      - name: Setup Java (Java/Kotlin only)
+        if: matrix.needs-java
+        uses: ./.github/actions/setup-java
+        with:
+          java-version: ${{ inputs.java-version }}
+
+      # Pin to SHA in production: https://github.com/github/codeql-action/releases
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          config-file: ./.github/codeql/codeql-config.yml
+
+      # Pin to SHA in production: https://github.com/github/codeql-action/releases
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@v3
+
+      # Pin to SHA in production: https://github.com/github/codeql-action/releases
+      - name: Analyze
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: /language:${{ matrix.language }}
+          upload: always
+
+  # ── 2. Dependency review (PRs only) ───────────────────────────────────────
+  dependency-review:
+    name: Dependency Review
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    permissions:
+      contents: read
+      pull-requests: write
+
+    steps:
+      # Pin to SHA in production: https://github.com/actions/checkout/releases
+      - uses: actions/checkout@v4
+
+      # Pin to SHA in production: https://github.com/actions/dependency-review-action/releases
+      - name: Dependency Review
+        uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: high
+          comment-summary-in-pr: always
+          # No fixed release exists yet; app is a Vite SPA (data router), RSC mode unused. See .trivyignore.
+          allow-ghsas: GHSA-qwww-vcr4-c8h2
+          # Strong copyleft is denied for shipped code. LGPL is weak copyleft and here it only
+          # appears in BUILD tooling (Checkstyle, FindSecBugs) that is never distributed, so those
+          # two are explicitly allowed. See docs/security/DEPENDENCY_POLICY.md.
+          deny-licenses: GPL-2.0, GPL-3.0, AGPL-3.0
+          allow-dependencies-licenses: >-
+            pkg:maven/com.puppycrawl.tools/checkstyle,
+            pkg:maven/com.h3xstream.findsecbugs/findsecbugs-plugin
+
+  # ── 3. Secret scanning with Gitleaks ──────────────────────────────────────
+  secret-scan:
+    name: Secret Scan (Gitleaks)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+
+    steps:
+      # Pin to SHA in production: https://github.com/actions/checkout/releases
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Gitleaks
+        run: |
+          curl -sSfL \
+            https://github.com/gitleaks/gitleaks/releases/download/v8.21.2/gitleaks_8.21.2_linux_x64.tar.gz \
+            | tar -xz -C /usr/local/bin gitleaks
+          gitleaks version
+
+      - name: Run Gitleaks
+        run: |
+          gitleaks detect \
+            --source . \
+            --config .gitleaks.toml \
+            --exit-code 1 \
+            --redact \
+            --report-format sarif \
+            --report-path gitleaks-report.sarif \
+            --log-level warn
+
+      - name: Secret scan summary
+        if: always()
+        run: |
+          {
+            echo "## Secret Scan (Gitleaks)"
+            echo ""
+            if [ -f gitleaks-report.sarif ]; then
+              COUNT=$(grep -o '"ruleId"' gitleaks-report.sarif 2>/dev/null | wc -l | tr -d ' ')
+              if [ "${COUNT:-0}" -gt 0 ]; then
+                echo "🚨 **$COUNT potential secret(s) detected** — this build fails. Rotate any real"
+                echo "credential immediately (rotation, not just removal — git history keeps the old value)."
+                echo "See docs/security/SECRET_HANDLING.md."
+              else
+                echo "No secrets detected. ✅"
+              fi
+            else
+              echo "No report produced."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload SARIF to Security tab
+        if: always()
+        continue-on-error: true
+        # Pin to SHA in production: https://github.com/github/codeql-action/releases
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: gitleaks-report.sarif
+          category: gitleaks
+
+      - name: Upload Gitleaks report artifact
+        if: always()
+        # Pin to SHA in production: https://github.com/actions/upload-artifact/releases
+        uses: actions/upload-artifact@v4
+        with:
+          name: gitleaks-report-${{ github.sha }}
+          path: gitleaks-report.sarif
+          retention-days: 30
+          if-no-files-found: warn
+
+  # ── 4. npm audit ──────────────────────────────────────────────────────────
+  npm-audit:
+    name: npm Audit
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: frontend
+
+    steps:
+      # Pin to SHA in production: https://github.com/actions/checkout/releases
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: ./.github/actions/setup-node
+        with:
+          node-version: ${{ inputs.node-version }}
+          working-directory: frontend
+
+      - name: Enforce high-severity gate (allowlist react-router — no fixed release; SPA, not RSC)
+        run: |
+          set +e
+          npm audit --json > npm-audit-report.json 2> npm-audit-report.stderr
+          audit_status=$?
+          set -e
+          AUDIT_EXIT_STATUS="$audit_status" node <<'NODE'
+            const fs = require("fs");
+            const status = Number(process.env.AUDIT_EXIT_STATUS);
+            const stderr = fs.readFileSync("npm-audit-report.stderr", "utf8").trim();
+
+            function unverified(detail) {
+              console.error("npm audit service failed; dependency security status could not be verified");
+              console.error(detail);
+              console.error("npm audit exit status: " + status);
+              if (stderr) console.error("npm audit stderr:\n" + stderr);
+              process.exit(1);
+            }
+
+            let a;
+            try {
+              a = JSON.parse(fs.readFileSync("npm-audit-report.json", "utf8"));
+            } catch (error) {
+              unverified("npm audit report is invalid: " + error.message);
+            }
+
+            if (!a || typeof a !== "object" || !a.vulnerabilities || typeof a.vulnerabilities !== "object" ||
+                !a.metadata || !a.metadata.vulnerabilities || typeof a.metadata.vulnerabilities !== "object") {
+              unverified("npm audit report is not a usable vulnerability report.");
+            }
+
+            // Allowlisted: no fixed release published and not exploitable here.
+            //  react-router / react-router-dom -> GHSA-qwww-vcr4-c8h2 (RSC-mode CSRF); this is a
+            //  Vite SPA using the data router, RSC mode is not used. review-by 2026-02-15.
+            const ALLOW = new Set(["react-router", "react-router-dom"]);
+            let blocking = 0;
+            for (const [name, v] of Object.entries(a.vulnerabilities || {})) {
+              if ((v.severity === "high" || v.severity === "critical") && !ALLOW.has(name)) {
+                console.error("BLOCK " + name + " (" + v.severity + ")");
+                blocking++;
+              }
+            }
+            if (blocking) { console.error(blocking + " non-allowlisted high/critical vuln(s)."); process.exit(1); }
+            if (status !== 0) console.log("npm audit exit status " + status + "; evaluated valid report using policy.");
+            console.log("npm audit gate OK (allowlisted: " + [...ALLOW].join(", ") + ")");
+          NODE
+
+      - name: npm audit summary
+        if: always()
+        run: |
+          {
+            echo "## Dependency Audit (npm — frontend)"
+            echo ""
+            if command -v jq >/dev/null 2>&1 && [ -f npm-audit-report.json ] && \
+              jq -e '(.vulnerabilities | type == "object") and (.metadata.vulnerabilities | type == "object")' npm-audit-report.json >/dev/null 2>&1; then
+              echo "| Severity | Count |"
+              echo "| --- | --- |"
+              for sev in critical high moderate low; do
+                n=$(jq -r ".metadata.vulnerabilities.$sev // 0" npm-audit-report.json)
+                echo "| ${sev^} | $n |"
+              done
+              echo ""
+              echo "Gate: build fails on **high** or above. Policy: docs/security/DEPENDENCY_POLICY.md."
+            else
+              echo "Audit report unavailable or invalid; the gate fails closed."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload npm audit report
+        if: always()
+        # Pin to SHA in production: https://github.com/actions/upload-artifact/releases
+        uses: actions/upload-artifact@v4
+        with:
+          name: npm-audit-report-${{ github.sha }}
+          path: |
+            frontend/npm-audit-report.json
+            frontend/npm-audit-report.stderr
+          retention-days: 30
+          if-no-files-found: warn
+
+  # ── 5. OWASP Dependency-Check ─────────────────────────────────────────────
+  owasp-check:
+    name: OWASP Dependency-Check
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: backend
+
+    steps:
+      # Pin to SHA in production: https://github.com/actions/checkout/releases
+      - uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: ./.github/actions/setup-java
+        with:
+          java-version: ${{ inputs.java-version }}
+
+      - name: Cache OWASP NVD data
+        # Pin to SHA in production: https://github.com/actions/cache/releases
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository/org/owasp/dependency-check-data
+          key: owasp-nvd-${{ runner.os }}-${{ hashFiles('backend/pom.xml') }}
+          restore-keys: |
+            owasp-nvd-${{ runner.os }}-
+
+      - name: Run OWASP Dependency-Check
+        env:
+          NVD_API_KEY: ${{ secrets.nvd_api_key }}
+          JAVA_OPTS: -Xmx2g
+        run: >
+          mvn -B
+          org.owasp:dependency-check-maven:9.0.9:check
+          -DfailBuildOnCVSS=7
+          -DskipTestScope=true
+          -Dformat=ALL
+          -DoutputDirectory=target/owasp-report
+          -DnvdApiKey="${NVD_API_KEY:-}"
+          -DsuppressionFile=../.github/owasp-suppressions.xml
+          -DfailOnError=false
+          --no-transfer-progress
+
+      - name: OWASP summary
+        if: always()
+        run: |
+          {
+            echo "## Dependency Audit (OWASP — backend)"
+            echo ""
+            REPORT=target/owasp-report/dependency-check-report.json
+            if command -v jq >/dev/null 2>&1 && [ -f "$REPORT" ]; then
+              TOTAL=$(jq '[.dependencies[].vulnerabilities // [] | length] | add // 0' "$REPORT" 2>/dev/null || echo '?')
+              echo "Vulnerabilities reported: \`$TOTAL\`. Gate: build fails at **CVSS ≥ 7**."
+            else
+              echo "See the uploaded OWASP report artifact for details. Gate: **CVSS ≥ 7**."
+            fi
+            echo ""
+            echo "Documented exceptions live in \`.github/owasp-suppressions.xml\`."
+            echo "Policy: docs/security/DEPENDENCY_POLICY.md."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload OWASP report
+        if: always()
+        # Pin to SHA in production: https://github.com/actions/upload-artifact/releases
+        uses: actions/upload-artifact@v4
+        with:
+          name: owasp-report-${{ github.sha }}
+          path: backend/target/owasp-report/
+          retention-days: 90
+          if-no-files-found: warn

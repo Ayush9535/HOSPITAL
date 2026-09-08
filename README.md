@@ -1,10 +1,10 @@
-# Hospital Management System - Phase 1
+# Hospital Management System (HMS)
 
-A multi-tenant Hospital Management System built with Spring Boot and React.
+A multi-tenant Hospital Management System built with Spring Boot, React, and MySQL.
 
 ## 🏥 Overview
 
-This is a **Phase-1 MVP** of a Hospital Management System designed as a multi-tenant SaaS platform. The system supports:
+This Hospital Management System is a multi-tenant SaaS platform that streamlines hospital operations across clinical, administrative, and inventory departments. The system supports standard workflows for OPD (Out-Patient Department), IPD (In-Patient Department), Pharmacy inventory, Hospital inventory tracking, configurable fees, support ticketing, and audit logging.
 
 - **Super Admin**: Platform owner who manages hospitals
 - **Hospital Admin**: Manages daily OPD operations for their hospital
@@ -18,46 +18,53 @@ This is a **Phase-1 MVP** of a Hospital Management System designed as a multi-te
 - Spring Security with JWT
 - Spring Data JPA
 - MySQL 8.0
-- Lombok
-- Maven
+- Lombok / Maven
 
 ### Frontend
 - React 18
 - React Router DOM
 - Axios
 - Tailwind CSS 3
-- Vite
 
-## 📋 Features
+## 👥 Roles & Features
 
-### Super Admin
-- ✅ Separate login at `/platform/login`
-- ✅ Create hospitals with admin credentials
-- ✅ View all hospitals
-- ✅ Activate/Deactivate hospitals
-- ❌ Cannot see hospital data (patients, doctors, etc.)
+### Super Admin (Platform level)
+- Separate login at `/platform/login`
+- Create hospitals with admin credentials
+- View all hospitals
+- Activate/Deactivate hospitals
+- Cannot see hospital data (patients, doctors, etc.)
+- Manage hospital tenant registry (registration, activation, deactivation).
+- Technical support ticketing dashboard.
+- Platform FAQ management.
+- Platform-level audit trails.
 
 ### Hospital Admin
-- ✅ Login at `/login`
-- ✅ Add and view patients
-- ✅ Add and view doctors (creates user account for doctor)
-- ✅ Create and view appointments
-- ✅ Create and view billing records (simple consultation fees)
+- Login at `/login`
+- Manage staff accounts (Doctors, Pharmacists, Receptionists, and Wards Admins).
+- Manage hospital-wide audit logging and system events.
+- Configure default Hospital Fees (consultations, case papers, and custom procedures).
+- Setup Wards and Bed availability for IPD admissions.
+- Manage clinical supplies catalog and configure inventory stock linkages.
 
 ### Doctor
-- ✅ Login at `/login`
-- ✅ View appointments
-- ✅ View patients
-- ❌ Cannot manage hospital data
+- Login at `/login`
+- Conduct patient consultations, document symptoms/diagnoses, and write prescriptions.
+- Administer in-clinic medicines and hospital inventory items (which automatically degrades inventory stock and applies scaled linked fees: `quantity * fee`).
+- Order lab tests and diagnostics.
+- Manage IPD Admissions, daily follow-ups, and patient discharge summaries.
 
-## 🔐 Multi-Tenant Architecture
+### Pharmacist
+- Login at `/login`
+- Manage medicine database, unit pricing, and active status.
+- File medicine purchases for stock replenishment.
+- View and dispense medications for doctor prescriptions.
 
-- **One backend, one database**
-- **Multi-tenancy via `hospital_id`**
-- Super Admin: `hospital_id = NULL`
-- Hospital users: `hospital_id = <valid ID>`
-- Backend automatically filters all data by `hospital_id`
-- JWT tokens contain `hospital_id` for automatic filtering
+### Receptionist
+- Login at `/login`
+- Register patients, track demographics, and assign custom public IDs.
+- Schedule and queue patient appointments.
+- Generate and print patient invoices, collect payments, and track outstanding bills.
 
 ## 🚀 Setup Instructions
 
@@ -69,23 +76,20 @@ This is a **Phase-1 MVP** of a Hospital Management System designed as a multi-te
 
 ### Database Setup
 
-1. Create MySQL database:
+1. Create a MySQL database:
 ```sql
 CREATE DATABASE hospital_management;
 ```
 
-2. Update database credentials in `backend/src/main/resources/application.properties`:
+2. Configure database credentials in `backend/src/main/resources/application.properties`:
 ```properties
 spring.datasource.username=root
 spring.datasource.password=your_password
 ```
 
-3. Create initial Super Admin user (run after first backend startup):
+3. Create the initial Super Admin user (run after first backend startup):
 ```sql
 USE hospital_management;
-
--- Create Super Admin user
--- Password: admin123 (BCrypt encoded)
 INSERT INTO users (email, password, name, role, hospital_id, created_at)
 VALUES ('admin@hms.com', '$2a$10$qMUbT7gyNjvCsRS//Gf7g.1vFwZAq9RVSn3qpLuPjUzoB8fz0AxWy', 'Super Admin', 'SUPER_ADMIN', NULL, NOW());
 ```
@@ -126,136 +130,33 @@ npm install
 npm run dev
 ```
 
-Frontend will start on `http://localhost:5173`
 
-## 🔑 Default Credentials
-
-### Super Admin
-- **URL**: http://localhost:5173/platform/login
-- **Email**: admin@hms.com
-- **Password**: admin123
-
-### Hospital Users
-After Super Admin creates a hospital, use the credentials provided during hospital creation.
+Frontend will start on `http://localhost:5173`.
 
 ## 📁 Project Structure
 
 ```
-Hospital management/
+Hospital Management/
 ├── backend/
 │   ├── src/main/java/com/hms/
 │   │   ├── entity/          # Database entities
 │   │   ├── repository/      # JPA repositories
-│   │   ├── service/         # Business logic
-│   │   │   ├── platform/    # Super Admin services
-│   │   │   └── hospital/    # Hospital services
-│   │   ├── controller/      # REST controllers
-│   │   │   ├── platform/    # Super Admin endpoints
-│   │   │   └── hospital/    # Hospital endpoints
-│   │   ├── security/        # JWT and security config
-│   │   ├── config/          # Spring configuration
-│   │   └── dto/             # Data transfer objects
+│   │   ├── service/         # Business logic (Platform & Hospital namespaces)
+│   │   ├── controller/      # REST endpoints (Platform & Hospital namespaces)
+│   │   ├── security/        # JWT parsing and security configuration
+│   │   ├── config/          # Spring beans and WebConfig
+│   │   └── dto/             # Data Transfer Objects
 │   └── pom.xml
 └── frontend/
     ├── src/
-    │   ├── pages/
-    │   │   ├── platform/    # Super Admin pages
-    │   │   └── hospital/    # Hospital pages
-    │   ├── components/      # Reusable components
-    │   ├── services/        # API services
-    │   └── App.jsx          # Main app with routing
+    │   ├── pages/           # Pages (Platform & Hospital namespaces)
+    │   ├── components/      # Reusable UI components
+    │   ├── services/        # Axios API handlers
+    │   └── App.jsx          # Router and main layout context
     └── package.json
 ```
 
-## 🔌 API Endpoints
-
-### Super Admin APIs
-- `POST /platform/login` - Super Admin login
-- `POST /platform/hospitals` - Create hospital
-- `GET /platform/hospitals` - List all hospitals
-- `GET /platform/hospitals/{id}` - Get hospital details
-- `PUT /platform/hospitals/{id}/status` - Activate/deactivate hospital
-
-### Hospital APIs
-- `POST /login` - Hospital user login
-- `GET /hospital/patients` - List patients
-- `POST /hospital/patients` - Add patient
-- `GET /hospital/doctors` - List doctors
-- `POST /hospital/doctors` - Add doctor
-- `GET /hospital/appointments` - List appointments
-- `POST /hospital/appointments` - Create appointment
-- `GET /hospital/billing` - List billing records
-- `POST /hospital/billing` - Create billing record
-
-## ⚠️ Phase-1 Limitations
-
-**NOT INCLUDED in Phase-1:**
-- ❌ Pharmacy management
-- ❌ Inventory tracking
-- ❌ Lab reports
-- ❌ Analytics dashboards
-- ❌ Payment gateway
-- ❌ PDF generation
-- ❌ GST calculations
-- ❌ Email/SMS notifications
-- ❌ Mobile apps
-- ❌ Auto hospital signup
-
-## 🧪 Testing
-
-### Manual Testing Flow
-
-1. **Super Admin Flow**:
-   - Login at `/platform/login`
-   - Create 2 hospitals (Hospital A, Hospital B)
-   - Verify both appear in list
-   - Deactivate Hospital B
-   - Verify status change
-
-2. **Hospital Admin Flow (Hospital A)**:
-   - Login at `/login` with Hospital A admin credentials
-   - Add 2 patients
-   - Add 1 doctor
-   - Create 2 appointments
-   - Create billing records
-
-3. **Multi-Tenant Isolation Test**:
-   - Login as Hospital B admin
-   - Verify Hospital A's data is NOT visible
-   - Add own data
-   - Verify isolation
-
-4. **Doctor Flow**:
-   - Login as doctor
-   - View appointments
-   - View patients
-   - Verify cannot access admin functions
-
-## 📝 Code Quality
-
-- ✅ All classes have comprehensive documentation
-- ✅ All methods have detailed comments
-- ✅ Inline comments for complex logic
-- ✅ No dead code or unused variables
-- ✅ Clean, readable, and maintainable code
-
-## 🤝 Contributing
-
-This is a Phase-1 MVP. Future phases will add:
-- Pharmacy and inventory management
-- Lab reports and diagnostics
-- Advanced analytics
-- Payment integration
-- Mobile applications
-
-## 📄 License
-
-Proprietary - All rights reserved
-
-## 👥 Authors
-
-HMS Development Team - Phase 1
-
----
-
-**Note**: This is a Phase-1 MVP focused on core OPD functionality. The system is designed to be easily extendable for future phases.
+## ⚠️ Limitations & Future Scope
+- ❌ External payment gateway integration (Stripe/Razorpay)
+- ❌ Automatic SMS and Email patient notifications
+- ❌ Dedicated native mobile applications (iOS/Android)

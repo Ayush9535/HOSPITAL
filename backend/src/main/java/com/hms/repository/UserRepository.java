@@ -43,6 +43,9 @@ public interface UserRepository extends JpaRepository<User, Long> {
          */
         Optional<User> findByPublicId(String publicId);
 
+        /** A user of one facility. Used to name who uploaded a document, without a global by-id read. */
+        Optional<User> findByIdAndHospitalId(Long id, Long hospitalId);
+
         /**
          * Find active users by hospital ID and role
          * Used for fetching lists like Receptionists
@@ -82,6 +85,71 @@ public interface UserRepository extends JpaRepository<User, Long> {
                         """)
         org.springframework.data.domain.Page<User> searchReceptionists(Long hospitalId, String role, String search,
                         org.springframework.data.domain.Pageable pageable);
+
+        @Query(value = "SELECT COALESCE(MAX(CAST(SUBSTRING(custom_id, 4) AS UNSIGNED)), 0) FROM users WHERE role = 'RECEPTIONIST' AND custom_id LIKE 'REC%'", nativeQuery = true)
+        Integer findMaxReceptionistSequence();
+
+        @Query("""
+                            SELECT u FROM User u
+                            WHERE u.hospitalId = :hospitalId
+                              AND u.role = :role
+                              AND u.isActive = true
+                              AND (LOWER(u.name) LIKE LOWER(CONCAT('%', :search, '%'))
+                                   OR LOWER(u.email) LIKE LOWER(CONCAT('%', :search, '%')))
+                        """)
+        org.springframework.data.domain.Page<User> searchNurses(Long hospitalId, String role, String search,
+                        org.springframework.data.domain.Pageable pageable);
+
+        @Query("""
+                            SELECT u FROM User u
+                            WHERE u.hospitalId = :hospitalId
+                              AND u.role = :role
+                              AND u.isActive = true
+                              AND (LOWER(u.name) LIKE LOWER(CONCAT('%', :search, '%'))
+                                   OR LOWER(u.email) LIKE LOWER(CONCAT('%', :search, '%')))
+                        """)
+        org.springframework.data.domain.Page<User> searchOtIncharges(Long hospitalId, String role, String search,
+                        org.springframework.data.domain.Pageable pageable);
+
+        /**
+         * Admin nurse list: both nurse roles (NURSE + NURSE_INCHARGE) and BOTH
+         * active states, so promoted incharges and deactivated nurses remain
+         * visible/manageable (promote/demote/activate).
+         */
+        @Query("""
+                            SELECT u FROM User u
+                            WHERE u.hospitalId = :hospitalId
+                              AND u.role IN ('NURSE', 'NURSE_INCHARGE')
+                        """)
+        org.springframework.data.domain.Page<User> findAllNursesForAdmin(Long hospitalId,
+                        org.springframework.data.domain.Pageable pageable);
+
+        @Query("""
+                            SELECT u FROM User u
+                            WHERE u.hospitalId = :hospitalId
+                              AND u.role IN ('NURSE', 'NURSE_INCHARGE')
+                              AND (LOWER(u.name) LIKE LOWER(CONCAT('%', :search, '%'))
+                                   OR LOWER(u.email) LIKE LOWER(CONCAT('%', :search, '%')))
+                        """)
+        org.springframework.data.domain.Page<User> searchAllNursesForAdmin(Long hospitalId, String search,
+                        org.springframework.data.domain.Pageable pageable);
+
+        @Query(value = "SELECT COALESCE(MAX(CAST(SUBSTRING(custom_id, 4) AS UNSIGNED)), 0) FROM users WHERE role = 'NURSE' AND custom_id LIKE 'NRS%'", nativeQuery = true)
+        Integer findMaxNurseSequence();
+
+        /**
+         * The session generation of an ACTIVE user, or empty.
+         *
+         * <p>Deliberately fail-closed and deliberately one query: a missing row and a deactivated
+         * row are both "empty", so the authentication filter cannot accidentally treat a deleted
+         * user as authenticated. Null isActive is read as active, matching the login check, which
+         * has always treated it that way.
+         */
+        @org.springframework.data.jpa.repository.Query(
+                "SELECT COALESCE(u.tokenVersion, 0) FROM User u WHERE u.id = :id "
+                        + "AND (u.isActive IS NULL OR u.isActive = true)")
+        java.util.Optional<Integer> findActiveTokenVersion(
+                @org.springframework.data.repository.query.Param("id") Long id);
 
         @org.springframework.data.jpa.repository.Query("SELECT new com.hms.dto.UserSummaryDTO(u, h.name) FROM User u LEFT JOIN Hospital h ON u.hospitalId = h.id "
                         +

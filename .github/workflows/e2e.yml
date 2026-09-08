@@ -1,0 +1,76 @@
+name: E2E (Playwright)
+
+# End-to-end tests — the SLOW tier, kept out of the fast PR CI. Runs on demand or when a PR
+# is labelled `e2e`. This job runs the credential-free SMOKE specs against a served frontend
+# build (fast, reliable, no backend needed). The full critical-workflow specs need a seeded
+# stack (admin login) — run those locally or against staging with E2E_ADMIN_* set.
+# See docs/testing/TESTING_STRATEGY.md.
+
+on:
+  workflow_dispatch:
+  pull_request:
+    types: [labeled, synchronize]
+    branches: [main, staging]
+
+permissions:
+  contents: read
+
+jobs:
+  e2e-smoke:
+    name: E2E smoke (served frontend)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # Only when manually dispatched, or on a PR that carries the `e2e` label.
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'e2e')
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      # Pin to SHA in production: https://github.com/actions/checkout/releases
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: ./.github/actions/setup-node
+        with:
+          node-version: ${{ vars.NODE_VERSION || '22' }}
+          working-directory: frontend
+
+      - name: Build frontend
+        run: npx vite build
+
+      - name: Install root e2e tooling (Playwright)
+        working-directory: .
+        run: npm ci
+        env:
+          HUSKY: 0
+
+      - name: Install Playwright browser
+        working-directory: .
+        run: npx playwright install --with-deps chromium
+
+      - name: Serve the built frontend
+        run: npx vite preview --port 5173 &
+
+      - name: Wait for the frontend
+        run: |
+          for _ in $(seq 1 30); do
+            curl -sf http://localhost:5173 >/dev/null && echo "frontend up" && exit 0
+            sleep 2
+          done
+          echo "frontend did not start" && exit 1
+
+      - name: Run Playwright smoke specs
+        working-directory: .
+        env:
+          E2E_BASE_URL: http://localhost:5173
+        run: npx playwright test --config e2e/playwright.config.js smoke.spec.js
+
+      - name: Upload Playwright report
+        if: always()
+        # Pin to SHA in production: https://github.com/actions/upload-artifact/releases
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report-${{ github.sha }}
+          path: e2e/playwright-report/
+          retention-days: 14
+          if-no-files-found: warn

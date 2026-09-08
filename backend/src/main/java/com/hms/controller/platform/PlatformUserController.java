@@ -13,7 +13,6 @@ import java.util.Map;
 
 @RestController
 @RequestMapping("/platform/users")
-@CrossOrigin(origins = { "http://localhost:3000", "http://localhost:5173" })
 @PreAuthorize("hasRole('SUPER_ADMIN')")
 public class PlatformUserController {
 
@@ -33,17 +32,8 @@ public class PlatformUserController {
 
     @PostMapping("/{id}/reset-password")
     public ResponseEntity<?> resetUserPassword(@PathVariable String id) {
-        try {
-            Map<String, String> credentials = userService.resetUserPassword(id);
-            return ResponseEntity.ok(credentials);
-        } catch (Exception e) {
-            return ResponseEntity.badRequest().body(e.getMessage());
-        }
+        Map<String, String> credentials = userService.resetUserPassword(id);
+        return ResponseEntity.ok(credentials);
     }
 
-    @GetMapping("/debug-users")
-    @PreAuthorize("permitAll()")
-    public ResponseEntity<java.util.List<com.hms.entity.User>> debugUsers() {
-        return ResponseEntity.ok(userService.debugGetAllUsers());
-    }
 }

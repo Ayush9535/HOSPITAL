@@ -1,0 +1,36 @@
+name: Actionlint
+
+# Validates GitHub Actions workflow files (syntax, expressions, and shellcheck of run: scripts).
+# Runs only when workflow files change. Note: on first run it may surface pre-existing shell
+# warnings in the larger deploy workflows — those are real lints worth addressing.
+
+on:
+  push:
+    paths:
+      - '.github/workflows/**'
+  pull_request:
+    paths:
+      - '.github/workflows/**'
+  workflow_dispatch:
+
+concurrency:
+  group: actionlint-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  actionlint:
+    name: Lint workflow files
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # Pin to SHA in production: https://github.com/actions/checkout/releases
+      - uses: actions/checkout@v4
+
+      - name: Run actionlint (rhysd/actionlint)
+        run: |
+          # Official rhysd/actionlint installer; shellcheck is preinstalled on the runner.
+          bash <(curl -sSfL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash) 1.7.7
+          ./actionlint -color

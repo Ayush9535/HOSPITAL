@@ -1,0 +1,31 @@
+# EditorConfig — consistent editor behaviour across macOS / Linux / Windows.
+# https://editorconfig.org  (supported natively by most IDEs / via plugin)
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 2
+
+# Java uses 4-space indentation
+[*.java]
+indent_size = 4
+
+# Maven / XML
+[*.{xml,pom}]
+indent_size = 2
+
+# Windows scripts must stay CRLF
+[*.{bat,cmd,ps1}]
+end_of_line = crlf
+
+# Don't trim trailing whitespace in Markdown (two spaces = hard line break)
+[*.md]
+trim_trailing_whitespace = false
+
+# Makefiles require tabs
+[Makefile]
+indent_style = tab

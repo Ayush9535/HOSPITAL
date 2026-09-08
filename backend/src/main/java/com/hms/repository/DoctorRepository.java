@@ -2,6 +2,8 @@ package com.hms.repository;
 
 import com.hms.entity.Doctor;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Query;
+import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
 
 import java.util.List;
@@ -49,6 +51,12 @@ public interface DoctorRepository extends JpaRepository<Doctor, Long> {
      */
     Optional<Doctor> findByIdAndHospitalIdAndIsActiveTrue(Long id, Long hospitalId);
 
+    /**
+     * ICU Phase 2 — batch, tenant-scoped resolve for the board's consultant column. Scoped
+     * rather than a bare findAllById so a stray id can never cross tenants.
+     */
+    List<Doctor> findByHospitalIdAndIdIn(Long hospitalId, java.util.Collection<Long> ids);
+
     Optional<Doctor> findByPublicIdAndHospitalIdAndIsActiveTrue(String publicId, Long hospitalId);
 
     /**
@@ -61,6 +69,16 @@ public interface DoctorRepository extends JpaRepository<Doctor, Long> {
      */
     Optional<Doctor> findByEmailAndHospitalId(String email, Long hospitalId);
 
+    default Optional<Doctor> findByIdOrUserId(Long id, UserRepository userRepository) {
+        if (id == null) return Optional.empty();
+        Optional<Doctor> doc = findById(id);
+        if (doc.isPresent()) {
+            return doc;
+        }
+        return userRepository.findById(id)
+                .flatMap(user -> findByEmailAndHospitalId(user.getEmail(), user.getHospitalId()));
+    }
+
     /**
      * Search active doctors by name or specialization
      * 
@@ -69,6 +87,10 @@ public interface DoctorRepository extends JpaRepository<Doctor, Long> {
      * @param spec       Specialization search term
      * @return List of matching doctors
      */
-    List<Doctor> findByHospitalIdAndIsActiveTrueAndNameContainingIgnoreCaseOrHospitalIdAndIsActiveTrueAndSpecializationContainingIgnoreCase(
-            Long hospitalId, String name, Long hospitalId2, String spec);
+    /** Same LIKE ESCAPE defect as the patient search; see PatientRepository. */
+    @Query("SELECT d FROM Doctor d WHERE d.hospitalId = :hospitalId AND d.isActive = true "
+            + "AND (LOWER(d.name) LIKE LOWER(CONCAT('%', :term, '%')) "
+            + "OR LOWER(d.specialization) LIKE LOWER(CONCAT('%', :term, '%')))")
+    List<Doctor> searchActiveByNameOrSpecialization(@Param("hospitalId") Long hospitalId,
+            @Param("term") String term);
 }

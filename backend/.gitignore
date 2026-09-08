@@ -39,4 +39,5 @@ build/
 *.log
 
 ### Configuration ###
-src/main/resources/application.properties
+# Removing block so configuration ships safely with environment placeholders
+application-local.properties

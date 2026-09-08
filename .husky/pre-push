@@ -1,0 +1,19 @@
+# Pre-push: HEAVIER validation so broken code never reaches GitHub.
+# Target < 2-3 min. Backend tests can exceed this (Spring context tests) —
+# skip them for rapid iteration with:  SKIP_BACKEND_TESTS=1 git push
+# Emergency bypass (use sparingly):     git push --no-verify
+set -e
+
+echo "▶ pre-push [1/2] frontend: build (tsc + vite) + unit tests"
+npm --prefix frontend run build
+npm --prefix frontend test
+
+if [ "${SKIP_BACKEND_TESTS:-0}" = "1" ]; then
+  echo "⏭  pre-push [2/2] backend: SKIPPED (SKIP_BACKEND_TESTS=1) — compile only"
+  mvn -f backend/pom.xml -q -DskipTests compile
+else
+  echo "▶ pre-push [2/2] backend: compile + unit tests (mvn test)"
+  mvn -f backend/pom.xml -q test
+fi
+
+echo "✅ pre-push checks passed"

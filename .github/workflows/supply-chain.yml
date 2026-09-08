@@ -1,0 +1,34 @@
+# ────────────────────────────────────────────
+# Supply Chain — Hospital Management System
+# ────────────────────────────────────────────
+
+name: Supply Chain
+
+on:
+  push:
+    branches-ignore:
+      - main
+      - staging
+    tags:
+      - 'v*'
+  pull_request:
+    branches:
+      - main
+      - staging
+  workflow_dispatch:
+
+concurrency:
+  group: supply-chain-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  security-events: write
+  id-token: write
+
+jobs:
+  supply-chain:
+    uses: ./.github/workflows/_supply-chain.yml
+    with:
+      node-version: ${{ vars.NODE_VERSION || '22' }}
+      java-version: ${{ vars.JAVA_VERSION || '17' }}

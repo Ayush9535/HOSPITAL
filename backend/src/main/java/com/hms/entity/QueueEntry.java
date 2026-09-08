@@ -11,16 +11,13 @@ public class QueueEntry {
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
-    @ManyToOne
+    @ManyToOne(fetch = jakarta.persistence.FetchType.LAZY)
     @JoinColumn(name = "opd_id")
     private Opd opd;
 
-    @ManyToOne
+    @ManyToOne(fetch = jakarta.persistence.FetchType.LAZY)
     @JoinColumn(name = "doctor_id")
     private Doctor doctor;
-
-    @Column(name = "token_number")
-    private Integer tokenNumber;
 
     @Column(name = "created_at")
     private LocalDateTime createdAt;
@@ -33,8 +30,6 @@ public class QueueEntry {
     public void setOpd(Opd opd) { this.opd = opd; }
     public Doctor getDoctor() { return doctor; }
     public void setDoctor(Doctor doctor) { this.doctor = doctor; }
-    public Integer getTokenNumber() { return tokenNumber; }
-    public void setTokenNumber(Integer tokenNumber) { this.tokenNumber = tokenNumber; }
     public LocalDateTime getCreatedAt() { return createdAt; }
     public void setCreatedAt(LocalDateTime createdAt) { this.createdAt = createdAt; }
 }

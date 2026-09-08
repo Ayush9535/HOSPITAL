@@ -1,0 +1,105 @@
+{
+  "__inputs": [
+    { "name": "DS_PROMETHEUS", "label": "Prometheus", "type": "datasource", "pluginId": "prometheus" }
+  ],
+  "title": "HMS — Service Overview",
+  "uid": "hms-overview",
+  "tags": ["hms", "backend", "sre"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-6h", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": { "text": "Prometheus", "value": "${DS_PROMETHEUS}" }
+      },
+      {
+        "name": "environment",
+        "type": "query",
+        "datasource": "${datasource}",
+        "query": "label_values(http_server_requests_seconds_count, environment)",
+        "refresh": 2,
+        "includeAll": true,
+        "current": { "text": "All", "value": "$__all" }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "title": "Request rate (req/s)",
+      "type": "timeseries",
+      "datasource": "${datasource}",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "targets": [
+        {
+          "expr": "sum(rate(http_server_requests_seconds_count{job=\"hms-backend\",environment=~\"$environment\"}[5m]))",
+          "legendFormat": "requests"
+        }
+      ]
+    },
+    {
+      "title": "5xx error rate (%)",
+      "type": "timeseries",
+      "datasource": "${datasource}",
+      "fieldConfig": { "defaults": { "unit": "percent" } },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "targets": [
+        {
+          "expr": "100 * sum(rate(http_server_requests_seconds_count{job=\"hms-backend\",status=~\"5..\",environment=~\"$environment\"}[5m])) / sum(rate(http_server_requests_seconds_count{job=\"hms-backend\",environment=~\"$environment\"}[5m]))",
+          "legendFormat": "5xx %"
+        }
+      ]
+    },
+    {
+      "title": "Latency p95 / p99 (s)",
+      "type": "timeseries",
+      "datasource": "${datasource}",
+      "fieldConfig": { "defaults": { "unit": "s" } },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(http_server_requests_seconds_bucket{job=\"hms-backend\",environment=~\"$environment\"}[5m])) by (le))",
+          "legendFormat": "p95"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(http_server_requests_seconds_bucket{job=\"hms-backend\",environment=~\"$environment\"}[5m])) by (le))",
+          "legendFormat": "p99"
+        }
+      ]
+    },
+    {
+      "title": "JVM heap used (%)",
+      "type": "timeseries",
+      "datasource": "${datasource}",
+      "fieldConfig": { "defaults": { "unit": "percent" } },
+      "gridPos": { "h": 8, "w": 6, "x": 12, "y": 8 },
+      "targets": [
+        {
+          "expr": "100 * sum(jvm_memory_used_bytes{job=\"hms-backend\",area=\"heap\",environment=~\"$environment\"}) / sum(jvm_memory_max_bytes{job=\"hms-backend\",area=\"heap\",environment=~\"$environment\"})",
+          "legendFormat": "heap %"
+        }
+      ]
+    },
+    {
+      "title": "DB pool active / max",
+      "type": "timeseries",
+      "datasource": "${datasource}",
+      "gridPos": { "h": 8, "w": 6, "x": 18, "y": 8 },
+      "targets": [
+        {
+          "expr": "sum(hikaricp_connections_active{job=\"hms-backend\",environment=~\"$environment\"})",
+          "legendFormat": "active"
+        },
+        {
+          "expr": "sum(hikaricp_connections_max{job=\"hms-backend\",environment=~\"$environment\"})",
+          "legendFormat": "max"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,33 @@
+# Example Prometheus scrape config for HMS. Merge into your prometheus.yml.
+# /actuator/prometheus is AUTHENTICATED (not public). Pick ONE secure access model:
+#   (A) Prometheus runs on the same VPS and scrapes localhost, with Nginx restricting
+#       /actuator/prometheus to 127.0.0.1 (recommended — no app change).
+#   (B) Bind Actuator to a separate management port not exposed by Nginx
+#       (set MANAGEMENT_SERVER_PORT on the service; then target that port here).
+# See docs/monitoring/OBSERVABILITY.md §Securing the scrape.
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  - hms-alerts.yml
+
+scrape_configs:
+  - job_name: hms-backend
+    metrics_path: /actuator/prometheus
+    scheme: http
+    static_configs:
+      # Model (A): same-host scrape of the app port (Nginx allow-lists this path to localhost).
+      - targets: ['127.0.0.1:8080']
+        labels:
+          environment: production
+    # If /actuator/prometheus is protected by HTTP basic auth at the Nginx layer, add:
+    # basic_auth:
+    #   username: prometheus
+    #   password_file: /etc/prometheus/hms_scrape_password
+
+# alerting:               # wire Alertmanager for notifications
+#   alertmanagers:
+#     - static_configs:
+#         - targets: ['127.0.0.1:9093']

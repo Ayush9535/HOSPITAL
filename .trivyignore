@@ -1,0 +1,10 @@
+# Trivy ignore file — documented, time-boxed vulnerability exceptions.
+# Used by the filesystem/config scans in .github/workflows/_supply-chain.yml.
+# Policy: every entry MUST have a justification, an owner, and a review date.
+# See docs/security/SUPPLY_CHAIN.md §"Handling findings".
+#
+# Format:  CVE-ID   # <justification> — owner: <who>, review-by: <YYYY-MM-DD>
+#
+# Active, triaged exceptions (no fixed release available / not applicable to this deployment):
+GHSA-qwww-vcr4-c8h2  # react-router RSC-mode CSRF bypass: this is a Vite SPA using the data router; RSC mode is not used, and no fixed release is published (npm latest 7.18.1 is still in-range). owner: frontend, review-by: 2026-02-15
+CVE-2026-22733       # Spring Boot Actuator CloudFoundry auth bypass: app deploys on a VPS (not CloudFoundry), so the vulnerable CF actuator endpoints are never active. owner: backend, review-by: 2026-02-15

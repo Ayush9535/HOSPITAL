@@ -1,0 +1,106 @@
+# Standard GitHub label set for the Hospital Management System.
+#
+# This file DEFINES the labels; it does not create them by itself. Create them
+# either manually in Settings → Labels, or sync automatically with a label-sync
+# action (e.g. crazy-max/ghaction-github-labeler) in a later DevOps phase.
+#
+# Categories: type/*, priority/*, area/*, status/* + a few specials that feed
+# release-note generation (.github/release.yml).
+
+# ── Type (what kind of change) ────────────────────────────────────────────────
+- name: "type: feature"
+  color: "0e8a16"
+  description: New capability
+- name: "type: bug"
+  color: "d73a4a"
+  description: Something is broken
+- name: "type: security"
+  color: "b60205"
+  description: Security fix or hardening
+- name: "type: performance"
+  color: "fbca04"
+  description: Performance improvement
+- name: "type: refactor"
+  color: "c5def5"
+  description: Code change with no behaviour change
+- name: "type: docs"
+  color: "0075ca"
+  description: Documentation only
+- name: "type: test"
+  color: "bfd4f2"
+  description: Tests only
+- name: "type: ci"
+  color: "5319e7"
+  description: CI/CD pipeline change
+- name: "type: build"
+  color: "5319e7"
+  description: Build system or tooling
+- name: "type: chore"
+  color: "ededed"
+  description: Maintenance / housekeeping
+
+# ── Priority ──────────────────────────────────────────────────────────────────
+- name: "priority: critical"
+  color: "b60205"
+  description: Drop everything — data loss, breach, or outage
+- name: "priority: high"
+  color: "d93f0b"
+  description: Fix soon
+- name: "priority: medium"
+  color: "fbca04"
+  description: Normal priority
+- name: "priority: low"
+  color: "0e8a16"
+  description: Nice to have
+
+# ── Area (which part of the system) ───────────────────────────────────────────
+- name: "area: backend"
+  color: "1d76db"
+- name: "area: frontend"
+  color: "1d76db"
+- name: "area: opd"
+  color: "c2e0c6"
+- name: "area: ipd"
+  color: "c2e0c6"
+- name: "area: pharmacy"
+  color: "c2e0c6"
+- name: "area: nursing"
+  color: "c2e0c6"
+- name: "area: ot"
+  color: "c2e0c6"
+- name: "area: billing"
+  color: "c2e0c6"
+- name: "area: auth"
+  color: "c2e0c6"
+- name: "area: multi-tenant"
+  color: "e99695"
+- name: "area: devops"
+  color: "5319e7"
+
+# ── Status (workflow state) ───────────────────────────────────────────────────
+- name: "status: triage"
+  color: "ededed"
+  description: Needs assessment
+- name: "status: blocked"
+  color: "d93f0b"
+- name: "status: in progress"
+  color: "fbca04"
+- name: "status: needs review"
+  color: "0075ca"
+- name: "status: wontfix"
+  color: "ffffff"
+
+# ── Specials (feed release notes / automation) ────────────────────────────────
+- name: "breaking change"
+  color: "b60205"
+  description: Backwards-incompatible change (major version bump)
+- name: "dependencies"
+  color: "0366d6"
+  description: Dependency update
+- name: "skip changelog"
+  color: "ededed"
+  description: Exclude from generated release notes
+- name: "good first issue"
+  color: "7057ff"
+- name: "help wanted"
+  color: "008672"

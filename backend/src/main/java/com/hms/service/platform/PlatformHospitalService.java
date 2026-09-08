@@ -2,16 +2,31 @@ package com.hms.service.platform;
 
 import com.hms.dto.CreateHospitalRequest;
 import com.hms.entity.AuditLog;
+import com.hms.entity.ClinicAdmin;
 import com.hms.entity.Hospital;
+import com.hms.entity.HospitalAdmin;
+import com.hms.entity.HospitalType;
+import com.hms.entity.PharmacyAdmin;
 import com.hms.entity.User;
+import com.hms.entity.Doctor;
+import com.hms.entity.HospitalSetting;
+import com.hms.exception.ResourceNotFoundException;
 import com.hms.repository.AuditLogRepository;
+import com.hms.repository.ClinicAdminRepository;
+import com.hms.repository.HospitalAdminRepository;
+import com.hms.repository.HospitalPlanSubscriptionRepository;
 import com.hms.repository.HospitalRepository;
+import com.hms.repository.PharmacyAdminRepository;
 import com.hms.repository.UserRepository;
+import com.hms.repository.DoctorRepository;
+import com.hms.repository.HospitalSettingRepository;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.HashMap;
 import java.util.List;
@@ -35,8 +50,28 @@ import java.util.Map;
 @Service
 public class PlatformHospitalService {
 
+    private static final Logger logger = LoggerFactory.getLogger(PlatformHospitalService.class);
+
+    /**
+     * Which OPD visits belong to a facility. Takes the hospital id three times.
+     *
+     * <p>opd has no hospital_id column: patient_id is the ownership rule the rest of the
+     * application uses, while doctor_id and receptionist_id are swept as well because they
+     * are foreign keys into doctors and users, which deleteHospital also removes.
+     */
+    private static final String OPD_TENANT_PREDICATE =
+            "patient_id IN (SELECT id FROM patients WHERE hospital_id = ?)"
+                    + " OR doctor_id IN (SELECT id FROM doctors WHERE hospital_id = ?)"
+                    + " OR receptionist_id IN (SELECT id FROM users WHERE hospital_id = ?)";
+
     @Autowired
     private HospitalRepository hospitalRepository;
+
+    @Autowired
+    private com.hms.service.RealtimeNotifier notifier;
+
+    @Autowired
+    private com.hms.security.HospitalWebSocketHandler webSocketHandler;
 
     @Autowired
     private UserRepository userRepository;
@@ -46,6 +81,30 @@ public class PlatformHospitalService {
 
     @Autowired
     private AuditLogRepository auditLogRepository;
+
+    @Autowired
+    private DoctorRepository doctorRepository;
+
+    @Autowired
+    private HospitalAdminRepository hospitalAdminRepository;
+
+    @Autowired
+    private ClinicAdminRepository clinicAdminRepository;
+
+    @Autowired
+    private PharmacyAdminRepository pharmacyAdminRepository;
+
+    @Autowired
+    private HospitalSettingRepository hospitalSettingRepository;
+
+    @Autowired
+    private PlatformPlanService planService;
+
+    @Autowired
+    private HospitalPlanSubscriptionRepository subscriptionRepository;
+
+    @Autowired
+    private org.springframework.jdbc.core.JdbcTemplate jdbcTemplate;
 
     /**
      * Create a new hospital with hospital admin user
@@ -62,34 +121,100 @@ public class PlatformHospitalService {
      */
     @Transactional
     public Hospital createHospital(CreateHospitalRequest request) {
-        // Check if admin email already exists
         if (userRepository.existsByEmail(request.getAdminEmail())) {
-            throw new RuntimeException("Email already exists");
+            throw new IllegalArgumentException("Email already exists: " + request.getAdminEmail());
         }
 
-        // Create hospital
+        HospitalType type = HospitalType.valueOf(request.getType());
+
         Hospital hospital = new Hospital();
         hospital.setName(request.getHospitalName());
         hospital.setIsActive(true);
-        hospital.setPlan("FREE"); // Default plan
-        if (request.getModules() != null && !request.getModules().isEmpty()) {
-            hospital.setModules(request.getModules());
+        hospital.setType(type);
+        if (type != HospitalType.PHARMACY && request.getIsSingleDoctor() != null) {
+            hospital.setIsSingleDoctor(request.getIsSingleDoctor());
+        } else {
+            hospital.setIsSingleDoctor(false);
         }
         hospital = hospitalRepository.save(hospital);
 
-        // Create hospital admin user
+        HospitalSetting settings = new HospitalSetting();
+        settings.setHospital(hospital);
+        settings.setReceptionMode("HAS_RECEPTIONIST");
+        settings.setBillingHandler("RECEPTIONIST");
+        settings.setInClinic(false);
+        hospitalSettingRepository.save(settings);
+
         User admin = new User();
         admin.setEmail(request.getAdminEmail());
         admin.setPassword(passwordEncoder.encode(request.getAdminPassword()));
         admin.setName(request.getAdminName());
         admin.setRole("HOSPITAL_ADMIN");
-        admin.setHospitalId(hospital.getId()); // Link to hospital
+        admin.setHospitalId(hospital.getId());
         userRepository.save(admin);
 
-        // Log action
-        logAction("HOSPITAL_CREATED", "Created hospital: " + hospital.getName() + " with admin: " + admin.getEmail());
+        if (type == HospitalType.CLINIC) {
+            ClinicAdmin clinicAdmin = new ClinicAdmin();
+            clinicAdmin.setHospitalId(hospital.getId());
+            clinicAdmin.setName(request.getAdminName());
+            clinicAdmin.setEmail(request.getAdminEmail());
+            clinicAdmin.setPhone("");
+            clinicAdmin.setIsActive(true);
+            clinicAdminRepository.save(clinicAdmin);
+        } else if (type == HospitalType.PHARMACY) {
+            PharmacyAdmin pharmacyAdmin = new PharmacyAdmin();
+            pharmacyAdmin.setHospitalId(hospital.getId());
+            pharmacyAdmin.setName(request.getAdminName());
+            pharmacyAdmin.setEmail(request.getAdminEmail());
+            pharmacyAdmin.setPhone("");
+            pharmacyAdmin.setIsActive(true);
+            pharmacyAdminRepository.save(pharmacyAdmin);
+        } else {
+            HospitalAdmin hospitalAdmin = new HospitalAdmin();
+            hospitalAdmin.setHospitalId(hospital.getId());
+            hospitalAdmin.setName(request.getAdminName());
+            hospitalAdmin.setEmail(request.getAdminEmail());
+            hospitalAdmin.setPhone("");
+            hospitalAdmin.setIsActive(true);
+            hospitalAdminRepository.save(hospitalAdmin);
+        }
 
-        return hospital;
+        if (type != HospitalType.PHARMACY && Boolean.TRUE.equals(hospital.getIsSingleDoctor())) {
+            Doctor doctor = new Doctor();
+            doctor.setHospitalId(hospital.getId());
+            doctor.setEmail(admin.getEmail());
+            doctor.setName(admin.getName());
+            doctor.setSpecialization("General Physician");
+            doctor.setPhone("0000000055");
+            doctor.setIsActive(true);
+            doctor = doctorRepository.save(doctor);
+            doctor.setCustomId("DOC" + doctor.getId());
+            doctorRepository.save(doctor);
+        }
+
+        com.hms.dto.AssignPlanRequest assignReq = new com.hms.dto.AssignPlanRequest();
+        assignReq.setHospitalPublicId(hospital.getPublicId());
+        assignReq.setBillingPeriod(request.getBillingPeriod());
+        com.hms.entity.HospitalPlanSubscription trialSub = planService.assignPlan(request.getPlanPublicId(), assignReq);
+        // Apply 7-day free trial to all newly created entities
+        trialSub.setExpiresAt(trialSub.getExpiresAt().plusDays(7));
+        subscriptionRepository.save(trialSub);
+
+        // In-Clinic must start OFF at creation for every tenant type. The plan grants
+        // the In-Clinic *capability* (module), but assignPlan() may have enabled the
+        // operational toggle — force it off so the admin explicitly opts in later.
+        settings.setInClinic(false);
+        // This is the new-tenant onboarding path. Existing settings retain their explicit
+        // value; a new tenant that purchased NURSING starts with a usable nurse login flow.
+        if (hospital.getModules() != null && hospital.getModules().contains("NURSING")) {
+            settings.setSeparateNurseLogin(true);
+        }
+        hospitalSettingRepository.save(settings);
+
+        logAction("HOSPITAL_CREATED",
+            "Created " + type + ": " + hospital.getName() + " with admin: " + admin.getEmail());
+
+        return hospitalRepository.findById(hospital.getId()).orElse(hospital);
     }
 
     /**
@@ -99,29 +224,48 @@ public class PlatformHospitalService {
      * @return Page of hospitals
      */
     public org.springframework.data.domain.Page<Hospital> getAllHospitals(
-            org.springframework.data.domain.Pageable pageable) {
-        return hospitalRepository.findAllByOrderByCreatedAtDesc(pageable);
+            org.springframework.data.domain.Pageable pageable,
+            String type) {
+        org.springframework.data.domain.Page<Hospital> hospitals =
+                (type != null && !type.isBlank())
+                        ? hospitalRepository.findByTypeOrderByCreatedAtDesc(HospitalType.valueOf(type), pageable)
+                        : hospitalRepository.findAllByOrderByCreatedAtDesc(pageable);
+
+        // Enrich each row with its current plan name (transient field) so the
+        // platform list shows the actual plan instead of a hardcoded default.
+        hospitals.forEach(hospital ->
+                subscriptionRepository.findByHospitalIdAndIsCurrentTrue(hospital.getId())
+                        .ifPresent(sub -> hospital.setPlanName(sub.getPlan().getName())));
+
+        return hospitals;
     }
 
     /**
-     * Get hospital statistics for Super Admin Overview dashboard
-     * Returns counts for total, active, and inactive hospitals
-     * 
-     * @return Map with hospital statistics
+     * Get tenant statistics for Super Admin Overview dashboard, broken down
+     * by business type (hospitals, clinics, pharmacies) since all three are
+     * stored as HospitalType-discriminated rows in the same table.
+     *
+     * @return Map keyed by "hospitals"/"clinics"/"pharmacies", each holding
+     *         its own total/active/inactive counts
      */
-    public Map<String, Long> getHospitalStats() {
-        List<Hospital> allHospitals = hospitalRepository.findAll();
+    public Map<String, Map<String, Long>> getHospitalStats() {
+        Map<String, Map<String, Long>> stats = new HashMap<>();
+        stats.put("hospitals", getStatsByType(HospitalType.HOSPITAL));
+        stats.put("clinics", getStatsByType(HospitalType.CLINIC));
+        stats.put("pharmacies", getStatsByType(HospitalType.PHARMACY));
+        return stats;
+    }
 
-        long total = allHospitals.size();
-        long active = allHospitals.stream().filter(Hospital::getIsActive).count();
+    private Map<String, Long> getStatsByType(HospitalType type) {
+        long total = hospitalRepository.countByType(type);
+        long active = hospitalRepository.countByTypeAndIsActive(type, true);
         long inactive = total - active;
 
-        Map<String, Long> stats = new HashMap<>();
-        stats.put("total", total);
-        stats.put("active", active);
-        stats.put("inactive", inactive);
-
-        return stats;
+        Map<String, Long> typeStats = new HashMap<>();
+        typeStats.put("total", total);
+        typeStats.put("active", active);
+        typeStats.put("inactive", inactive);
+        return typeStats;
     }
 
     /**
@@ -133,10 +277,10 @@ public class PlatformHospitalService {
      */
     public Hospital getHospitalByPublicId(String publicId) {
         if (publicId == null) {
-            throw new RuntimeException("Hospital ID cannot be null");
+            throw new IllegalArgumentException("Hospital ID cannot be null");
         }
         return hospitalRepository.findByPublicId(publicId)
-                .orElseThrow(() -> new RuntimeException("Hospital not found"));
+                .orElseThrow(() -> new ResourceNotFoundException("Hospital not found: " + publicId));
     }
 
     /**
@@ -150,10 +294,20 @@ public class PlatformHospitalService {
         dto.setCustomId(hospital.getCustomId());
         dto.setName(hospital.getName());
         dto.setIsActive(hospital.getIsActive());
-        dto.setPlan(hospital.getPlan());
+        // dto.setPlan(hospital.getPlan()); // Removed - plan field replaced with subscription info (Task 12)
         dto.setModules(hospital.getModules());
         dto.setAddress(hospital.getAddress());
         dto.setPhone(hospital.getPhone());
+        dto.setIsSingleDoctor(hospital.getIsSingleDoctor());
+        dto.setType(hospital.getType() != null ? hospital.getType().name() : "HOSPITAL");
+        dto.setSubscriptionStatus(hospital.getSubscriptionStatus());
+
+        subscriptionRepository.findByHospitalIdAndIsCurrentTrue(hospital.getId()).ifPresent(sub -> {
+            dto.setPlanName(sub.getPlan().getName());
+            dto.setBillingPeriod(sub.getBillingPeriod().name());
+            dto.setAssignedAt(sub.getAssignedAt());
+            dto.setExpiresAt(sub.getExpiresAt());
+        });
 
         // Fetch Admin Email
         List<User> admins = userRepository.findByHospitalIdAndRole(hospital.getId(), "HOSPITAL_ADMIN");
@@ -178,7 +332,7 @@ public class PlatformHospitalService {
      */
     public Hospital updateHospitalStatus(String publicId, Boolean isActive, String reason) {
         Hospital hospital = hospitalRepository.findByPublicId(publicId)
-                .orElseThrow(() -> new RuntimeException("Hospital not found"));
+                .orElseThrow(() -> new ResourceNotFoundException("Hospital not found: " + publicId));
 
         boolean oldStatus = hospital.getIsActive();
         hospital.setIsActive(isActive);
@@ -189,78 +343,75 @@ public class PlatformHospitalService {
             logAction(action,
                     "Updated status for hospital: " + hospital.getName() + " to " + (isActive ? "Active" : "Inactive"),
                     reason);
+            // Blocking a tenant has to reach the people using it right now, not at their next
+            // login. SETTINGS_UPDATED makes each client re-read /auth/me, which refuses an
+            // inactive hospital (401) and drops them at the login screen — so a blocked tenant
+            // stops working immediately instead of staying usable for the rest of the session.
+            notifyTenant(hospital.getId());
         }
 
         return savedHospital;
     }
 
     /**
-     * Update hospital subscription plan
-     * 
-     * @param publicId Hospital Public ID
-     * @param plan     New plan (FREE, BASIC, PREMIUM, ENTERPRISE)
-     * @return Updated Hospital entity
+     * Tell everyone signed in at a tenant that something the platform owns changed underneath
+     * them (name, admin identity, single-doctor mode, active status), so the UI reflects it live
+     * instead of at the next login. SETTINGS_UPDATED re-reads the profile; REFRESH_DATA reloads
+     * the lists. Best-effort: a socket failure must not fail the platform's write.
+     *
+     * Fires after the transaction commits where one is active, so a client that immediately
+     * re-fetches cannot read the pre-change row and cache it again.
      */
-    public Hospital updateHospitalPlan(String publicId, String plan, String reason) {
-        Hospital hospital = hospitalRepository.findByPublicId(publicId)
-                .orElseThrow(() -> new RuntimeException("Hospital not found"));
+    private void notifyTenant(Long hospitalId) {
+        if (hospitalId == null) return;
+        Runnable push = () -> {
+            try {
+                webSocketHandler.broadcast(hospitalId, "{\"type\":\"SETTINGS_UPDATED\"}");
+                webSocketHandler.broadcast(hospitalId, "{\"type\":\"REFRESH_DATA\"}");
+            } catch (Exception e) {
+                logger.warn("Failed to broadcast platform change to hospital {}", hospitalId, e);
+            }
+        };
 
-        String oldPlan = hospital.getPlan();
-        hospital.setPlan(plan);
-        Hospital savedHospital = hospitalRepository.save(hospital);
-
-        if (!oldPlan.equals(plan)) {
-            logAction("PLAN_UPDATED",
-                    "Updated plan for hospital: " + hospital.getName() + " from " + oldPlan + " to " + plan, reason);
+        if (org.springframework.transaction.support.TransactionSynchronizationManager.isSynchronizationActive()) {
+            org.springframework.transaction.support.TransactionSynchronizationManager.registerSynchronization(
+                    new org.springframework.transaction.support.TransactionSynchronization() {
+                        @Override
+                        public void afterCommit() {
+                            push.run();
+                        }
+                    });
+        } else {
+            push.run();
         }
-
-        return savedHospital;
-    }
-
-    /**
-     * Update hospital enabled modules
-     * 
-     * @param publicId Hospital Public ID
-     * @param modules  List of enabled modules
-     * @return Updated Hospital entity
-     */
-    public Hospital updateHospitalModules(String publicId, List<String> modules, String reason) {
-        Hospital hospital = hospitalRepository.findByPublicId(publicId)
-                .orElseThrow(() -> new RuntimeException("Hospital not found"));
-
-        if (modules == null || modules.isEmpty()) {
-            throw new RuntimeException("At least one module must be enabled");
-        }
-
-        hospital.setModules(modules);
-        Hospital savedHospital = hospitalRepository.save(hospital);
-
-        logAction("MODULES_UPDATED",
-                "Updated modules for hospital: " + hospital.getName() + " to " + modules, reason);
-
-        return savedHospital;
     }
 
     /**
      * Reset Tenant Admin Password
-     * 
-     * @param publicId Hospital Public ID
-     * @return Map containing "email" and "password"
+     * Password is now provided by Super Admin — not auto-generated.
+     *
+     * @param publicId    Hospital Public ID
+     * @param newPassword New password chosen by Super Admin
+     * @param reason      Reason for reset
+     * @return Map containing "email" and success confirmation
      */
-    public Map<String, String> resetTenantAdminPassword(String publicId, String reason) {
+    public Map<String, String> resetTenantAdminPassword(String publicId, String newPassword, String reason) {
+        if (newPassword == null || newPassword.trim().isEmpty()) {
+            throw new IllegalArgumentException("Password cannot be empty");
+        }
+        if (newPassword.length() < 6) {
+            throw new IllegalArgumentException("Password must be at least 6 characters");
+        }
+
         Hospital hospital = hospitalRepository.findByPublicId(publicId)
-                .orElseThrow(() -> new RuntimeException("Hospital not found"));
+                .orElseThrow(() -> new ResourceNotFoundException("Hospital not found: " + publicId));
 
         List<User> admins = userRepository.findByHospitalIdAndRole(hospital.getId(), "HOSPITAL_ADMIN");
         if (admins.isEmpty()) {
-            throw new RuntimeException("No admin found for this hospital");
+            throw new ResourceNotFoundException("No admin found for this hospital");
         }
 
-        // Reset the first admin found (usually there's only one main admin)
         User admin = admins.get(0);
-
-        // Generate random password (8 chars)
-        String newPassword = java.util.UUID.randomUUID().toString().substring(0, 8);
         admin.setPassword(passwordEncoder.encode(newPassword));
         userRepository.save(admin);
 
@@ -268,22 +419,27 @@ public class PlatformHospitalService {
 
         Map<String, String> result = new HashMap<>();
         result.put("email", admin.getEmail());
-        result.put("password", newPassword);
+        result.put("message", "Password reset successfully");
         return result;
     }
 
     /**
-     * Update hospital name and admin email
+     * Update hospital name, admin email, and single doctor status
      */
     @Transactional
     public Hospital updateHospitalDetails(String publicId, String name, String adminEmail, String adminName,
-            String reason) {
+            String reason, Boolean isSingleDoctor) {
         Hospital hospital = hospitalRepository.findByPublicId(publicId)
-                .orElseThrow(() -> new RuntimeException("Hospital not found"));
+                .orElseThrow(() -> new ResourceNotFoundException("Hospital not found: " + publicId));
 
         boolean nameChanged = !hospital.getName().equals(name);
         String oldName = hospital.getName();
         hospital.setName(name);
+
+        boolean isSingleDoctorChanged = isSingleDoctor != null && !isSingleDoctor.equals(hospital.getIsSingleDoctor());
+        if (isSingleDoctor != null) {
+            hospital.setIsSingleDoctor(isSingleDoctor);
+        }
 
         // Update Admin Email & Name
         List<User> admins = userRepository.findByHospitalIdAndRole(hospital.getId(), "HOSPITAL_ADMIN");
@@ -299,7 +455,7 @@ public class PlatformHospitalService {
             // Update Email
             if (adminEmail != null && !adminEmail.trim().isEmpty() && !admin.getEmail().equals(adminEmail)) {
                 if (userRepository.existsByEmail(adminEmail)) {
-                    throw new RuntimeException("Email already exists");
+                    throw new IllegalArgumentException("Email already exists: " + adminEmail);
                 }
                 oldEmail = admin.getEmail();
                 admin.setEmail(adminEmail);
@@ -322,27 +478,198 @@ public class PlatformHospitalService {
 
         Hospital savedHospital = hospitalRepository.save(hospital);
 
-        if (nameChanged || emailChanged || adminNameChanged) {
+        // If Single Doctor Clinic is enabled, ensure a Doctor profile exists (only if OPD is enabled)
+        if (Boolean.TRUE.equals(savedHospital.getIsSingleDoctor()) && savedHospital.getModules() != null && savedHospital.getModules().contains("OPD")) {
+            String targetEmail = adminEmail != null ? adminEmail.trim() : (admins.isEmpty() ? "" : admins.get(0).getEmail());
+            String targetName = adminName != null ? adminName.trim() : (admins.isEmpty() ? "" : admins.get(0).getName());
+            
+            if (!targetEmail.isEmpty()) {
+                boolean doctorExists = doctorRepository.findByEmailAndHospitalId(targetEmail, savedHospital.getId()).isPresent();
+                if (!doctorExists) {
+                    Doctor doctor = new Doctor();
+                    doctor.setHospitalId(savedHospital.getId());
+                    doctor.setEmail(targetEmail);
+                    doctor.setName(targetName);
+                    doctor.setSpecialization("General Physician");
+                    doctor.setPhone("0000000055");
+                    doctor.setIsActive(true);
+                    doctor = doctorRepository.save(doctor);
+                    doctor.setCustomId("DOC" + doctor.getId());
+                    doctorRepository.save(doctor);
+                }
+            }
+        }
+
+        if (nameChanged || emailChanged || adminNameChanged || isSingleDoctorChanged) {
             StringBuilder details = new StringBuilder("Updated details for hospital. ");
             if (nameChanged)
                 details.append("Hospital Name: '").append(oldName).append("' -> '").append(name).append("'. ");
             if (emailChanged)
                 details.append("Email: '").append(oldEmail).append("' -> '").append(adminEmailValue).append("'. ");
             if (adminNameChanged)
-                details.append("Admin Name: '").append(oldAdminName).append("' -> '").append(adminName).append("'.");
+                details.append("Admin Name: '").append(oldAdminName).append("' -> '").append(adminName).append("'. ");
+            if (isSingleDoctorChanged)
+                details.append("Single Doctor Mode: '").append(!isSingleDoctor).append("' -> '").append(isSingleDoctor).append("'.");
             logAction("HOSPITAL_UPDATED", details.toString(), reason);
+            // The tenant's own header shows the hospital name, and single-doctor mode changes what
+            // the admin can do — push it rather than making them log out to see it.
+            notifyTenant(savedHospital.getId());
         }
 
         return savedHospital;
     }
 
     /**
+     * Delete a facility (hospital, clinic or pharmacy) and all its related data.
+     *
+     * <p>Statements are ordered child-before-parent so every foreign key stays satisfied
+     * while it runs. FOREIGN_KEY_CHECKS is deliberately NOT disabled: suppressing the
+     * constraints also suppresses the ON DELETE CASCADE rules that the migration-created
+     * tenant tables declare against hospitals(id), which is what left orphaned rows behind.
+     * Leaving the checks on means the database enforces the ordering rather than trusting it,
+     * and the cascades it owns actually fire.
+     *
+     * <p>OPD carries no hospital_id. Its tenancy is the owning patient -- the same rule
+     * OpdRepository uses ("Opd has no hospital_id of its own, so tenancy is proven through
+     * the owning patient"). Deletion additionally sweeps rows reachable through this
+     * facility's doctor or receptionist: those columns are real foreign keys into doctors
+     * and users, both of which are deleted below, so a visit with a missing patient would
+     * otherwise survive and block them.
+     */
+    @Transactional
+    public void deleteHospital(String publicId) {
+        Hospital hospital = hospitalRepository.findByPublicId(publicId)
+                .orElseThrow(() -> new ResourceNotFoundException("Hospital not found: " + publicId));
+        Long id = hospital.getId();
+        String name = hospital.getName();
+
+        purgeTenantConfiguration(id);
+
+        // Billing
+        jdbcTemplate.update("DELETE FROM billing_payments WHERE billing_id IN (SELECT id FROM billing WHERE hospital_id = ?)", id);
+        jdbcTemplate.update("DELETE FROM billing_medicines WHERE billing_id IN (SELECT id FROM billing WHERE hospital_id = ?)", id);
+        jdbcTemplate.update("DELETE FROM billing_items WHERE billing_id IN (SELECT id FROM billing WHERE hospital_id = ?)", id);
+        jdbcTemplate.update("DELETE FROM billing WHERE hospital_id = ?", id);
+
+        // IPD
+        jdbcTemplate.update("DELETE FROM discharge_summary WHERE ipd_admission_id IN (SELECT id FROM ipd_admission WHERE hospital_id = ?)", id);
+        jdbcTemplate.update("DELETE FROM ipd_bed_history WHERE ipd_admission_id IN (SELECT id FROM ipd_admission WHERE hospital_id = ?)", id);
+        jdbcTemplate.update("DELETE FROM ipd_admission WHERE hospital_id = ?", id);
+
+        // OPD -- scoped through patient / doctor / receptionist, since opd has no hospital_id.
+        jdbcTemplate.update(
+                "DELETE FROM queue_entry WHERE opd_id IN (SELECT id FROM opd WHERE " + OPD_TENANT_PREDICATE + ")"
+                        + " OR doctor_id IN (SELECT id FROM doctors WHERE hospital_id = ?)",
+                id, id, id, id);
+        jdbcTemplate.update("DELETE FROM opd WHERE " + OPD_TENANT_PREDICATE, id, id, id);
+
+        // Clinical records
+        jdbcTemplate.update("DELETE FROM prescriptions WHERE hospital_id = ?", id);
+        jdbcTemplate.update("DELETE FROM medical_records WHERE hospital_id = ?", id);
+        jdbcTemplate.update("DELETE FROM lab_orders WHERE hospital_id = ?", id);
+        jdbcTemplate.update("DELETE FROM appointments WHERE hospital_id = ?", id);
+        jdbcTemplate.update("DELETE FROM patients WHERE hospital_id = ?", id);
+
+        // Pharmacy
+        jdbcTemplate.update("DELETE FROM pharmacy_sale_items WHERE sale_id IN (SELECT id FROM pharmacy_sales WHERE hospital_id = ?)", id);
+        jdbcTemplate.update("DELETE FROM pharmacy_sales WHERE hospital_id = ?", id);
+        jdbcTemplate.update("DELETE FROM purchase_invoice_items WHERE purchase_invoice_id IN (SELECT id FROM purchase_invoices WHERE hospital_id = ?)", id);
+        jdbcTemplate.update("DELETE FROM purchase_invoices WHERE hospital_id = ?", id);
+        jdbcTemplate.update("DELETE FROM inventory_transactions WHERE hospital_id = ?", id);
+        jdbcTemplate.update("DELETE FROM medicine_batches WHERE hospital_id = ?", id);
+        jdbcTemplate.update("DELETE FROM medicine_master WHERE hospital_id = ?", id);
+        jdbcTemplate.update("DELETE FROM suppliers WHERE hospital_id = ?", id);
+        jdbcTemplate.update("DELETE FROM manufacturers WHERE hospital_id = ?", id);
+        jdbcTemplate.update("DELETE FROM medicine_categories WHERE hospital_id = ?", id);
+
+        // Hospital inventory
+        jdbcTemplate.update("DELETE FROM hospital_inventory_purchase WHERE hospital_id = ?", id);
+        jdbcTemplate.update("DELETE FROM hospital_inventory WHERE hospital_id = ?", id);
+
+        // Clinic medicines
+        jdbcTemplate.update("DELETE FROM medicine_purchase WHERE hospital_id = ?", id);
+        jdbcTemplate.update("DELETE FROM medicines WHERE hospital_id = ?", id);
+        // medicine_list is NOT deleted: it is the global medicine catalogue the platform
+        // administers, discriminated by hospital_type (HOSPITAL/CLINIC/PHARMACY), not owned
+        // by a facility. Its hospital_id column was dropped by DatabaseMigrationRunner when
+        // the table became shared master data; deleting from it here would have destroyed
+        // the catalogue for every other tenant.
+
+        // Inventory items
+        jdbcTemplate.update("DELETE FROM inventory_items WHERE hospital_id = ?", id);
+
+        // Beds & wards -- beds carry their own hospital_id, so no join through wards is needed
+        // (and wards' primary key is ward_id, not id, which the previous subquery assumed).
+        jdbcTemplate.update("DELETE FROM beds WHERE hospital_id = ?", id);
+        jdbcTemplate.update("DELETE FROM wards WHERE hospital_id = ?", id);
+
+        // Staff
+        jdbcTemplate.update("DELETE FROM doctors WHERE hospital_id = ?", id);
+        jdbcTemplate.update("DELETE FROM receptionists WHERE hospital_id = ?", id);
+        jdbcTemplate.update("DELETE FROM pharmacists WHERE hospital_id = ?", id);
+        jdbcTemplate.update("DELETE FROM hospital_admins WHERE hospital_id = ?", id);
+        jdbcTemplate.update("DELETE FROM clinic_admins WHERE hospital_id = ?", id);
+        jdbcTemplate.update("DELETE FROM pharmacy_admins WHERE hospital_id = ?", id);
+
+        // Settings & fees
+        jdbcTemplate.update("DELETE FROM hospital_fees WHERE hospital_id = ?", id);
+        jdbcTemplate.update("DELETE FROM hospital_settings WHERE hospital_id = ?", id);
+
+        // Subscriptions & modules
+        jdbcTemplate.update("DELETE FROM hospital_plan_subscriptions WHERE hospital_id = ?", id);
+        jdbcTemplate.update("DELETE FROM hospital_modules WHERE hospital_id = ?", id);
+
+        // Users & audit data
+        jdbcTemplate.update("DELETE FROM users WHERE hospital_id = ?", id);
+        jdbcTemplate.update("DELETE FROM audit_logs WHERE hospital_id = ?", id);
+        jdbcTemplate.update("DELETE FROM support_tickets WHERE hospital_id = ?", id);
+
+        // The facility row last: tenant tables created by the migration runner declare
+        // ON DELETE CASCADE against it, so this is what collects them.
+        jdbcTemplate.update("DELETE FROM hospitals WHERE id = ?", id);
+
+        logAction("HOSPITAL_DELETED", "Permanently deleted hospital: " + name + " (publicId: " + publicId + ")");
+    }
+
+    /**
+     * Removes the facility's configuration, presets, scheduling and permissions.
+     *
+     * <p>These tables carried a hospital_id and were never in the delete path, so every deleted
+     * facility left them behind. The statements are generated from {@link TenantTables}, in its
+     * declared child-before-parent order, rather than written out here: the registry is what the
+     * fence test checks against, and a list that lives in two places drifts.
+     *
+     * <p>Runs before anything else, because role_permissions is first in that order. If a facility
+     * id is ever reused -- the AUTO_INCREMENT counter resets on TRUNCATE, on an environment
+     * rebuild, and on restart before MySQL 8.0 -- a surviving permission matrix would be picked up
+     * by whoever inherits the id, and OtPermissionService reads "no rows" as "not configured",
+     * so it would not fall back to the safe defaults.
+     *
+     * <p>Only PURGE_SAFE tables. Clinical, financial, HR and audit history is untouched by this
+     * method; what the rest of deleteHospital does with those is unchanged.
+     *
+     * <p>Table names and predicates are compile-time constants from the registry, never request
+     * input, so string-building the statement introduces no injection surface. The hospital id is
+     * still bound as a parameter.
+     */
+    private void purgeTenantConfiguration(Long hospitalId) {
+        for (TenantTables.TenantTable table : TenantTables.purgeSafeInOrder()) {
+            Object[] args = new Object[table.binds()];
+            java.util.Arrays.fill(args, hospitalId);
+            jdbcTemplate.update("DELETE FROM " + table.table() + " WHERE " + table.where(), args);
+        }
+    }
+
+    /**
      * Get all audit logs
-     * 
+     *
      * @return List of audit logs
      */
     public List<AuditLog> getAuditLogs() {
-        return auditLogRepository.findAllByOrderByTimestampDesc();
+        // Platform login shows only platform-level activity (tenant onboarding/updates/blocks,
+        // plan changes, password resets) — i.e. Super Admin actions, which carry a null hospitalId.
+        // Each tenant's own internal events (hospitalId set) stay in that tenant's audit view.
+        return auditLogRepository.findByHospitalIdIsNullOrderByTimestampDesc();
     }
 
     /**
@@ -367,8 +694,14 @@ public class PlatformHospitalService {
             log.setHospitalId(hospitalId);
             auditLogRepository.save(log);
         } catch (Exception e) {
-            // Improve: Log error to console, but don't fail the operation
-            System.err.println("Failed to save audit log: " + e.getMessage());
+            // Improve: Log error using SLF4J, but don't fail the operation
+            logger.error("Failed to save audit log: {}", e.getMessage(), e);
         }
+
+        // Every tenant mutation the platform performs (create, block, password reset, update,
+        // delete) passes through here, so this is the one place that can keep a second Super Admin
+        // tab honest. Without it the platform's own tenant list was the most stale screen in the
+        // product: it broadcast nothing and listened for nothing but NEW_TICKET.
+        notifier.platform("{\"type\":\"REFRESH_DATA\"}");
     }
 }
