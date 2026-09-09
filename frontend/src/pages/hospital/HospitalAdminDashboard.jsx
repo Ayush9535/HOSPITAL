@@ -38,6 +38,10 @@ import OpdPaymentFields, {
 } from '../../components/OpdPaymentFields';
 import PageHeader from '../../components/PageHeader';
 import PatientDetailsModal from '../../components/PatientDetailsModal';
+import PatientFormFields, {
+  patientFormRules,
+  stripPatientPayload,
+} from '../../components/PatientFormFields';
 import PatientModal from '../../components/PatientModal';
 import PrescriptionPresetsManager from '../../components/PrescriptionPresetsManager';
 import ProfileModal from '../../components/ProfileModal';
@@ -335,6 +339,12 @@ const HospitalAdminDashboard = () => {
   const { isOn, customs } = useEnabledVitals();
   const [adminOpdPatientSearch, setAdminOpdPatientSearch] = useState('');
   const [adminOpdShowDropdown, setAdminOpdShowDropdown] = useState(false);
+  // OPD "New Patient": the patient fields are rendered inline in this same OPD form, so one
+  // submit registers the patient and opens their OPD. Same fields, same client rules and the
+  // same endpoint as the Patients tab - the existing-patient search path below is untouched.
+  const [adminOpdPatientMode, setAdminOpdPatientMode] = useState('existing'); // 'existing' | 'new'
+  const [adminNewPatientForm, setAdminNewPatientForm] = useState({ insurance: 'NO' });
+  const [adminNewPatientErrors, setAdminNewPatientErrors] = useState({});
 
   // Auto-assign the doctor in the Admin OPD form when the hospital has exactly one
   // (mirrors the receptionist OPD flow, which already does this).
@@ -343,6 +353,27 @@ const HospitalAdminDashboard = () => {
       setAdminOpdForm((prev) => ({ ...prev, doctorId: doctors[0].id }));
     }
   }, [isAdminOpdModalOpen, doctors]);
+
+  // Reset the OPD "New Patient" state whenever the OPD modal closes (cancel, X or a
+  // successful create), so the next open starts on the existing-patient search.
+  useEffect(() => {
+    if (!isAdminOpdModalOpen) {
+      setAdminOpdPatientMode('existing');
+      setAdminNewPatientForm({ insurance: 'NO' });
+      setAdminNewPatientErrors({});
+    }
+  }, [isAdminOpdModalOpen]);
+
+  // True while the OPD form is collecting a brand new patient inline instead of searching.
+  // POST /hospital/patients allows only these roles, so the option is hidden for anyone
+  // else rather than letting them walk into a 403.
+  const adminCanCreatePatient = user?.role === 'HOSPITAL_ADMIN' || user?.role === 'RECEPTIONIST';
+  const isAdminNewOpdPatient = adminCanCreatePatient && adminOpdPatientMode === 'new';
+
+  const handleAdminNewPatientChange = (field, value) => {
+    setAdminNewPatientForm((prev) => ({ ...prev, [field]: value }));
+    setAdminNewPatientErrors((prev) => (prev[field] ? { ...prev, [field]: null } : prev));
+  };
 
   // IPD Admit from OPD (Admin)
   const [isAdminIpdAdmitOpen, setIsAdminIpdAdmitOpen] = useState(false);
@@ -5813,7 +5844,16 @@ const HospitalAdminDashboard = () => {
             <form
               onSubmit={async (e) => {
                 e.preventDefault();
-                if (!adminOpdForm.patientId) {
+                // Every check runs before any request, so a bad vitals value can never leave a
+                // patient created with no OPD behind it.
+                if (isAdminNewOpdPatient) {
+                  const patientErrors = validateForm(adminNewPatientForm, patientFormRules);
+                  setAdminNewPatientErrors(patientErrors);
+                  if (Object.keys(patientErrors).length > 0) {
+                    toastError('Please correct the highlighted patient details');
+                    return;
+                  }
+                } else if (!adminOpdForm.patientId) {
                   toastError('Please select a valid patient from the suggestions');
                   return;
                 }
@@ -5875,9 +5915,26 @@ const HospitalAdminDashboard = () => {
                   return;
                 }
 
+                // Two sequential calls to the two existing endpoints. The OPD is only
+                // attempted once the patient exists.
+                let patientId = adminOpdForm.patientId;
+                if (isAdminNewOpdPatient) {
+                  try {
+                    const created = await hospitalService.addPatient(
+                      stripPatientPayload(adminNewPatientForm)
+                    );
+                    patientId = created?.id;
+                    if (!patientId) throw new Error('Patient was saved without an id');
+                  } catch (err) {
+                    console.error('Failed to create patient', err);
+                    toastError(extractApiError(err, 'Failed to create patient'));
+                    return;
+                  }
+                }
+
                 try {
                   const payload = {
-                    patientId: adminOpdForm.patientId,
+                    patientId,
                     doctorId: adminOpdForm.doctorId,
                     bp: adminOpdForm.bp ? adminOpdForm.bp : null,
                     temperature: adminOpdForm.temperature
@@ -5924,81 +5981,132 @@ const HospitalAdminDashboard = () => {
               }}
               className="p-6 space-y-4 max-h-[76vh] overflow-auto"
             >
+              {adminCanCreatePatient && (
+                <div
+                  className="inline-flex p-1 bg-neutral-100 rounded-xl"
+                  role="group"
+                  aria-label="Patient source"
+                >
+                  <button
+                    type="button"
+                    aria-pressed={adminOpdPatientMode === 'existing'}
+                    onClick={() => setAdminOpdPatientMode('existing')}
+                    className={`px-4 py-1.5 text-xs font-bold rounded-lg transition-colors ${
+                      adminOpdPatientMode === 'existing'
+                        ? 'bg-white text-neutral-900 shadow-sm'
+                        : 'text-neutral-500 hover:text-neutral-700'
+                    }`}
+                  >
+                    Existing Patient
+                  </button>
+                  <button
+                    type="button"
+                    aria-pressed={adminOpdPatientMode === 'new'}
+                    onClick={() => {
+                      setAdminOpdPatientMode('new');
+                      setAdminOpdShowDropdown(false);
+                      // Drop any patient picked by search, so only one of the two
+                      // sources is ever in play.
+                      setAdminOpdPatientSearch('');
+                      setAdminOpdForm((prev) => ({ ...prev, patientId: null }));
+                    }}
+                    className={`px-4 py-1.5 text-xs font-bold rounded-lg transition-colors ${
+                      adminOpdPatientMode === 'new'
+                        ? 'bg-white text-neutral-900 shadow-sm'
+                        : 'text-neutral-500 hover:text-neutral-700'
+                    }`}
+                  >
+                    New Patient
+                  </button>
+                </div>
+              )}
+              {isAdminNewOpdPatient && (
+                <div className="border border-neutral-200 rounded-xl p-4 space-y-4 bg-neutral-50/40">
+                  <p className="text-sm font-semibold text-neutral-800">New Patient Details</p>
+                  <PatientFormFields
+                    values={adminNewPatientForm}
+                    errors={adminNewPatientErrors}
+                    onChange={handleAdminNewPatientChange}
+                  />
+                </div>
+              )}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 {/* Patient Search */}
-                <div className="relative">
-                  <span className="block text-sm font-semibold text-neutral-700 mb-2">
-                    Patient <span className="text-red-600">*</span>
-                  </span>
+                {!isAdminNewOpdPatient && (
                   <div className="relative">
-                    <span className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-neutral-400">
-                      <svg
-                        className="w-5 h-5"
-                        fill="none"
-                        viewBox="0 0 24 24"
-                        stroke="currentColor"
-                      >
-                        <path
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                          strokeWidth={2}
-                          d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"
-                        />
-                      </svg>
+                    <span className="block text-sm font-semibold text-neutral-700 mb-2">
+                      Patient <span className="text-red-600">*</span>
                     </span>
-                    <input
-                      type="text"
-                      className="w-full border border-gray-300 rounded-xl pl-10 pr-4 py-2 focus:ring-2 focus:ring-sky-500 text-sm focus:border-transparent text-slate-800"
-                      value={adminOpdPatientSearch}
-                      onChange={(e) => {
-                        setAdminOpdPatientSearch(e.target.value);
-                        setAdminOpdShowDropdown(true);
-                        setAdminOpdForm((prev) => ({ ...prev, patientId: null }));
-                      }}
-                      onFocus={() => setAdminOpdShowDropdown(true)}
-                      onBlur={() => setTimeout(() => setAdminOpdShowDropdown(false), 250)}
-                      placeholder="Type patient name to search..."
-                      autoComplete="off"
-                    />
-                  </div>
-                  {adminOpdShowDropdown && adminOpdPatientSearch.trim().length >= 2 && (
-                    <div className="absolute left-0 right-0 mt-1 bg-white border border-neutral-200 rounded-xl shadow-xl z-50 max-h-60 overflow-y-auto divide-y divide-neutral-100">
-                      {patients.filter((p) =>
-                        p.name?.toLowerCase().includes(adminOpdPatientSearch.toLowerCase())
-                      ).length > 0 ? (
-                        patients
-                          .filter((p) =>
-                            p.name?.toLowerCase().includes(adminOpdPatientSearch.toLowerCase())
-                          )
-                          .map((p) => (
-                            <button
-                              type="button"
-                              key={p.id}
-                              onMouseDown={() => {
-                                setAdminOpdForm((prev) => ({ ...prev, patientId: p.id }));
-                                setAdminOpdPatientSearch(
-                                  `${p.name}${p.phone ? ` (${p.phone})` : ''}`
-                                );
-                                setAdminOpdShowDropdown(false);
-                              }}
-                              className="w-full px-4 py-3 hover:bg-neutral-50 cursor-pointer transition-colors duration-150 flex flex-col gap-0.5 text-left border-0"
-                            >
-                              <span className="font-semibold text-neutral-800 text-sm">
-                                {p.name}
-                              </span>
-                              <span className="text-xs text-neutral-500">
-                                {p.phone ? `📞 ${p.phone}` : ''} | {p.age} Yrs | {p.gender}
-                              </span>
-                            </button>
-                          ))
-                      ) : (
-                        <div className="px-4 py-4 text-sm text-neutral-500 text-center">
-                          No matching patients found
-                        </div>
-                      )}
+                    <div className="relative">
+                      <span className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-neutral-400">
+                        <svg
+                          className="w-5 h-5"
+                          fill="none"
+                          viewBox="0 0 24 24"
+                          stroke="currentColor"
+                        >
+                          <path
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            strokeWidth={2}
+                            d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"
+                          />
+                        </svg>
+                      </span>
+                      <input
+                        type="text"
+                        className="w-full border border-gray-300 rounded-xl pl-10 pr-4 py-2 focus:ring-2 focus:ring-sky-500 text-sm focus:border-transparent text-slate-800"
+                        value={adminOpdPatientSearch}
+                        onChange={(e) => {
+                          setAdminOpdPatientSearch(e.target.value);
+                          setAdminOpdShowDropdown(true);
+                          setAdminOpdForm((prev) => ({ ...prev, patientId: null }));
+                        }}
+                        onFocus={() => setAdminOpdShowDropdown(true)}
+                        onBlur={() => setTimeout(() => setAdminOpdShowDropdown(false), 250)}
+                        placeholder="Type patient name to search..."
+                        autoComplete="off"
+                      />
                     </div>
-                  )}
-                </div>
+                    {adminOpdShowDropdown && adminOpdPatientSearch.trim().length >= 2 && (
+                      <div className="absolute left-0 right-0 mt-1 bg-white border border-neutral-200 rounded-xl shadow-xl z-50 max-h-60 overflow-y-auto divide-y divide-neutral-100">
+                        {patients.filter((p) =>
+                          p.name?.toLowerCase().includes(adminOpdPatientSearch.toLowerCase())
+                        ).length > 0 ? (
+                          patients
+                            .filter((p) =>
+                              p.name?.toLowerCase().includes(adminOpdPatientSearch.toLowerCase())
+                            )
+                            .map((p) => (
+                              <button
+                                type="button"
+                                key={p.id}
+                                onMouseDown={() => {
+                                  setAdminOpdForm((prev) => ({ ...prev, patientId: p.id }));
+                                  setAdminOpdPatientSearch(
+                                    `${p.name}${p.phone ? ` (${p.phone})` : ''}`
+                                  );
+                                  setAdminOpdShowDropdown(false);
+                                }}
+                                className="w-full px-4 py-3 hover:bg-neutral-50 cursor-pointer transition-colors duration-150 flex flex-col gap-0.5 text-left border-0"
+                              >
+                                <span className="font-semibold text-neutral-800 text-sm">
+                                  {p.name}
+                                </span>
+                                <span className="text-xs text-neutral-500">
+                                  {p.phone ? `📞 ${p.phone}` : ''} | {p.age} Yrs | {p.gender}
+                                </span>
+                              </button>
+                            ))
+                        ) : (
+                          <div className="px-4 py-4 text-sm text-neutral-500 text-center">
+                            No matching patients found
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
                 {/* Doctor Select */}
                 <div>
                   <label

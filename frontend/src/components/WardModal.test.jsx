@@ -62,7 +62,12 @@ describe('WardModal — ICU unit type (ICU-2 G3/G5)', () => {
     icuService.getUnitTypes.mockResolvedValue(UNIT_TYPES);
 
     render(<WardModal open initial={null} onClose={vi.fn()} onSaved={vi.fn()} />);
-    fireEvent.change(await screen.findByLabelText('Unit Type'), { target: { value: 'ICU' } });
+    const select = await screen.findByLabelText('Unit Type');
+    // The <option>s arrive from getUnitTypes after the select itself renders. Changing the
+    // value before they land is a no-op, so unitType never reaches the payload - which is
+    // why this test failed at random once the suite was loaded enough to widen that gap.
+    await screen.findByRole('option', { name: 'Intensive Care Unit' });
+    fireEvent.change(select, { target: { value: 'ICU' } });
     fillRequired();
     fireEvent.click(screen.getByRole('button', { name: /save/i }));
 

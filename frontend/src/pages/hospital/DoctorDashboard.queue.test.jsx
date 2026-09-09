@@ -170,13 +170,14 @@ describe('DoctorDashboard Overview — layout keeps the Queue beside the left pa
   });
 
   it('places exactly two panels in that grid in both module states', async () => {
+    // waitFor the grid itself, not the service call: after the remount below, the call
+    // assertion is already satisfied by the first render, so it waits for nothing and the
+    // count was read while the second panel was still on its way in.
     const { unmount } = await renderDashboard(WALK_IN_ONLY);
-    await waitFor(() => expect(hospitalService.getDoctorQueue).toHaveBeenCalled());
-    expect(overviewGrid().children).toHaveLength(2);
+    await waitFor(() => expect(overviewGrid().children).toHaveLength(2));
     unmount();
 
     await renderDashboard(WITH_APPOINTMENTS);
-    await waitFor(() => expect(hospitalService.getDoctorQueue).toHaveBeenCalled());
-    expect(overviewGrid().children).toHaveLength(2);
+    await waitFor(() => expect(overviewGrid().children).toHaveLength(2));
   });
 });

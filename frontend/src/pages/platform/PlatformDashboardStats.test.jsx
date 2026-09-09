@@ -42,8 +42,7 @@ const hospitalCardCounts = () => {
   const label = screen.getByText('Hospitals', { selector: 'p' });
   const card = label.closest('div.bg-white');
   const value = (name) =>
-    Array.from(card.querySelectorAll('p'))
-      .find((p) => p.textContent === name)
+    Array.from(card.querySelectorAll('p')).find((p) => p.textContent === name)
       .previousElementSibling.textContent;
   return { total: value('Total'), active: value('Active'), inactive: value('Inactive') };
 };
@@ -80,7 +79,9 @@ describe('PlatformDashboard overview stats cache', () => {
     renderDashboard();
 
     await waitFor(() => expect(platformService.getHospitalStats).toHaveBeenCalledTimes(1));
-    await waitFor(() => expect(hospitalCardCounts()).toEqual({ total: '1', active: '1', inactive: '0' }));
+    await waitFor(() =>
+      expect(hospitalCardCounts()).toEqual({ total: '1', active: '1', inactive: '0' })
+    );
   });
 
   it('serves the cached counts on a revisit inside the TTL', async () => {
@@ -112,8 +113,7 @@ describe('PlatformDashboard overview stats cache', () => {
 
     await waitFor(() => expect(platformService.getHospitalStats).toHaveBeenCalledTimes(2));
     await waitFor(() =>
-      expect(hospitalCardCounts())
-        .toEqual({ total: '1', active: '0', inactive: '1' })
+      expect(hospitalCardCounts()).toEqual({ total: '1', active: '0', inactive: '1' })
     );
   });
 
@@ -174,9 +174,19 @@ describe('PlatformDashboard overview stats cache', () => {
     await user.click(buttons[buttons.length - 1]);
     await user.click(await screen.findByText(/Deactivate/i));
 
-    // The confirmation requires a reason.
-    await user.type(screen.getByRole('textbox'), 'audit regression');
-    await user.click(screen.getByLabelText('Confirm action'));
+    // The confirmation requires a reason. ConfirmationModal moves focus to its Cancel button
+    // 50ms after opening (BUG-039 focus trap), so typing the instant the dialog appears lets
+    // that timer steal the rest of the keystrokes: the reason lands half-typed or not at all,
+    // Confirm stays disabled, and the click silently does nothing. Wait for focus to settle,
+    // then type, and confirm the value actually landed before clicking.
+    const dialog = await screen.findByRole('dialog');
+    await waitFor(() =>
+      expect(within(dialog).getByLabelText('Cancel and close dialog')).toHaveFocus()
+    );
+    const reasonInput = within(dialog).getByRole('textbox');
+    await user.type(reasonInput, 'audit regression');
+    await waitFor(() => expect(reasonInput).toHaveValue('audit regression'));
+    await user.click(within(dialog).getByLabelText('Confirm action'));
     await waitFor(() => expect(platformService.updateHospitalStatus).toHaveBeenCalled());
 
     // Now visit the overview: the counts must be refetched, not served from cache.

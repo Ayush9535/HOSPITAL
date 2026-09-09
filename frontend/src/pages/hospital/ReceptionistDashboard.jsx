@@ -1,5 +1,4 @@
 import { createColumnHelper } from '@tanstack/react-table';
-import FollowUpPanel from '../../components/FollowUpPanel';
 import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import ActionMenu from '../../components/ActionMenu';
@@ -8,6 +7,7 @@ import ConfirmationModal from '../../components/ConfirmationModal';
 import DataTable from '../../components/DataTable';
 import DateSelect from '../../components/DateSelect';
 import EmptyState from '../../components/EmptyState';
+import FollowUpPanel from '../../components/FollowUpPanel';
 import HistoryDrawer from '../../components/HistoryDrawer';
 import HospitalInventoryTab from '../../components/HospitalInventoryTab';
 import IpdAdmitModal from '../../components/IpdAdmitModal';
@@ -20,6 +20,10 @@ import OpdPaymentFields, {
 } from '../../components/OpdPaymentFields';
 import PageHeader from '../../components/PageHeader';
 import PatientDetailsModal from '../../components/PatientDetailsModal';
+import PatientFormFields, {
+  patientFormRules,
+  stripPatientPayload,
+} from '../../components/PatientFormFields';
 import PatientModal from '../../components/PatientModal';
 import PrescriptionModal from '../../components/PrescriptionModal';
 import PrescriptionViewModal from '../../components/PrescriptionViewModal';
@@ -38,10 +42,13 @@ import hospitalService from '../../services/hospitalService';
 import otService from '../../services/otService';
 import { extractApiError, safeLoadMessage } from '../../utils/apiError';
 import { formatDateTime, formatTime } from '../../utils/date';
+import { createOptionalModuleFetcher } from '../../utils/optionalModule';
 import { printPdf } from '../../utils/printPdf';
+import { validateForm } from '../../utils/validation';
 import BillingTable from './BillingTable';
 import IcuBedBoard from './icu/IcuBedBoard';
 import IcuDashboard from './icu/IcuDashboard';
+import AnaesthesiaClearanceModal from './ot/AnaesthesiaClearanceModal';
 import DayCareSurgeryModal from './ot/DayCareSurgeryModal';
 import OtAnalyticsStrip from './ot/OtAnalyticsStrip';
 import OtBoard from './ot/OtBoard';
@@ -49,10 +56,8 @@ import OtDayBoard from './ot/OtDayBoard';
 import OtListPrint from './ot/OtListPrint';
 import RecoveryModal from './ot/RecoveryModal';
 import ScheduleSurgeryModal from './ot/ScheduleSurgeryModal';
-import AnaesthesiaClearanceModal from './ot/AnaesthesiaClearanceModal';
 import SurgeryExecutionModal from './ot/SurgeryExecutionModal';
 import SurgeryTeamModal from './ot/SurgeryTeamModal';
-import { createOptionalModuleFetcher } from '../../utils/optionalModule';
 
 const ReceptionistDashboard = () => {
   const [user, setUser] = useState(() => authService.getCurrentUser());
@@ -147,12 +152,24 @@ const ReceptionistDashboard = () => {
   const [selectedPatient, setSelectedPatient] = useState(null);
   const [patientSearchText, setPatientSearchText] = useState('');
   const [showPatientDropdown, setShowPatientDropdown] = useState(false);
+  // OPD "New Patient": the patient fields are rendered inline in this same OPD form, so one
+  // submit registers the patient and opens their OPD. Same fields, same client rules and the
+  // same endpoint as the Patients tab - the existing-patient search path below is untouched.
+  const [opdPatientMode, setOpdPatientMode] = useState('existing'); // 'existing' | 'new'
+  const [newPatientForm, setNewPatientForm] = useState({ insurance: 'NO' });
+  const [newPatientErrors, setNewPatientErrors] = useState({});
+  // POST /hospital/patients allows only these roles, so the option is hidden for
+  // anyone else rather than letting them walk into a 403.
+  const canCreatePatient = user?.role === 'HOSPITAL_ADMIN' || user?.role === 'RECEPTIONIST';
 
   // Reset OPD patient search state when modal is opened or closed
   useEffect(() => {
     if (!isOpdModalOpen) {
       setPatientSearchText('');
       setShowPatientDropdown(false);
+      setOpdPatientMode('existing');
+      setNewPatientForm({ insurance: 'NO' });
+      setNewPatientErrors({});
       setOpdForm((prev) => ({
         ...prev,
         patientId: null,
@@ -1029,6 +1046,14 @@ const ReceptionistDashboard = () => {
 
   const showPatientSuggestions = showPatientDropdown && patientSearchText.trim().length >= 3;
 
+  // True while the OPD form is collecting a brand new patient inline instead of searching.
+  const isNewOpdPatient = canCreatePatient && opdPatientMode === 'new';
+
+  const handleNewPatientChange = (field, value) => {
+    setNewPatientForm((prev) => ({ ...prev, [field]: value }));
+    setNewPatientErrors((prev) => (prev[field] ? { ...prev, [field]: null } : prev));
+  };
+
   return (
     <div className="flex h-screen bg-white">
       {/* Sidebar */}
@@ -1172,7 +1197,9 @@ const ReceptionistDashboard = () => {
               </div>
 
               {/* Follow-ups remain available for walk-in hospitals, independent of appointments. */}
-              <div className={`${hasAppointments ? 'grid grid-cols-1 lg:grid-cols-3' : 'grid grid-cols-1 lg:grid-cols-2'} gap-8 mt-8`}>
+              <div
+                className={`${hasAppointments ? 'grid grid-cols-1 lg:grid-cols-3' : 'grid grid-cols-1 lg:grid-cols-2'} gap-8 mt-8`}
+              >
                 {hasAppointments && (
                   <div className="bg-white rounded-2xl border border-gray-200 shadow-sm flex flex-col h-[650px] overflow-hidden">
                     <div className="p-6 border-b border-gray-100 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 bg-gradient-to-r from-gray-50/50 to-white">
@@ -1283,7 +1310,6 @@ const ReceptionistDashboard = () => {
                           />
                         )}
                       </div>
-
                     </div>
                   </div>
                 )}
@@ -1291,7 +1317,9 @@ const ReceptionistDashboard = () => {
                 <div className="bg-white rounded-2xl border border-gray-200 shadow-sm flex flex-col h-[650px] overflow-hidden">
                   <div className="p-6 border-b border-gray-100 bg-gradient-to-r from-gray-50/50 to-white">
                     <h3 className="text-lg font-bold text-gray-955">Today&apos;s Follow-Ups</h3>
-                    <p className="text-xs text-gray-500 mt-0.5">Patients due for a follow-up today</p>
+                    <p className="text-xs text-gray-500 mt-0.5">
+                      Patients due for a follow-up today
+                    </p>
                   </div>
                   <div className="flex-1 overflow-auto p-6">
                     {todaysFollowUps.length > 0 ? (
@@ -1299,26 +1327,46 @@ const ReceptionistDashboard = () => {
                         <table className="w-full text-sm text-left">
                           <thead>
                             <tr className="bg-gray-50 border-b border-gray-100">
-                              <th className="px-4 py-3 text-xs font-bold text-gray-600 uppercase tracking-wider">Patient ID</th>
-                              <th className="px-4 py-3 text-xs font-bold text-gray-600 uppercase tracking-wider">Patient Name</th>
-                              <th className="px-4 py-3 text-xs font-bold text-gray-600 uppercase tracking-wider">Assigned Doctor</th>
-                              <th className="px-4 py-3 text-xs font-bold text-gray-600 uppercase tracking-wider">Diagnosis / Reason</th>
+                              <th className="px-4 py-3 text-xs font-bold text-gray-600 uppercase tracking-wider">
+                                Patient ID
+                              </th>
+                              <th className="px-4 py-3 text-xs font-bold text-gray-600 uppercase tracking-wider">
+                                Patient Name
+                              </th>
+                              <th className="px-4 py-3 text-xs font-bold text-gray-600 uppercase tracking-wider">
+                                Assigned Doctor
+                              </th>
+                              <th className="px-4 py-3 text-xs font-bold text-gray-600 uppercase tracking-wider">
+                                Diagnosis / Reason
+                              </th>
                             </tr>
                           </thead>
                           <tbody className="divide-y divide-gray-50">
                             {todaysFollowUps.map((record) => (
                               <tr key={record.id} className="hover:bg-gray-50/40 transition-colors">
-                                <td className="px-4 py-3.5 text-xs font-bold text-indigo-600">{record.patientCustomId || record.patientPublicId || '-'}</td>
-                                <td className="px-4 py-3.5 text-sm font-semibold text-gray-900">{record.patientName || '-'}</td>
-                                <td className="px-4 py-3.5 text-sm text-gray-600">{record.doctorName || '-'}</td>
-                                <td className="px-4 py-3.5 text-sm text-gray-500 italic">{record.diagnosis || 'Follow-up'}</td>
+                                <td className="px-4 py-3.5 text-xs font-bold text-indigo-600">
+                                  {record.patientCustomId || record.patientPublicId || '-'}
+                                </td>
+                                <td className="px-4 py-3.5 text-sm font-semibold text-gray-900">
+                                  {record.patientName || '-'}
+                                </td>
+                                <td className="px-4 py-3.5 text-sm text-gray-600">
+                                  {record.doctorName || '-'}
+                                </td>
+                                <td className="px-4 py-3.5 text-sm text-gray-500 italic">
+                                  {record.diagnosis || 'Follow-up'}
+                                </td>
                               </tr>
                             ))}
                           </tbody>
                         </table>
                       </div>
                     ) : (
-                      <EmptyState icon={null} title="No Follow-Ups Today" message="No follow-ups scheduled for today." />
+                      <EmptyState
+                        icon={null}
+                        title="No Follow-Ups Today"
+                        message="No follow-ups scheduled for today."
+                      />
                     )}
                   </div>
                 </div>
@@ -1694,6 +1742,7 @@ const ReceptionistDashboard = () => {
                     onAction={() => setIsAddModalOpen(true)}
                   />
                 ))}
+              {/* eslint-disable-next-line jsx-a11y/aria-role -- `role` is FollowUpPanel's own prop, not an ARIA role */}
               {activeTab === 'follow-ups' && <FollowUpPanel role="RECEPTIONIST" />}
               {activeTab === 'opd' &&
                 (opds.length > 0 ? (
@@ -2250,7 +2299,16 @@ const ReceptionistDashboard = () => {
               onSubmit={async (e) => {
                 e.preventDefault();
                 if (opdSubmitting) return;
-                if (!opdForm.patientId) {
+                // Every check runs before any request, so a bad vitals value can never leave a
+                // patient created with no OPD behind it.
+                if (isNewOpdPatient) {
+                  const patientErrors = validateForm(newPatientForm, patientFormRules);
+                  setNewPatientErrors(patientErrors);
+                  if (Object.keys(patientErrors).length > 0) {
+                    toastError('Please correct the highlighted patient details');
+                    return;
+                  }
+                } else if (!opdForm.patientId) {
                   toastError('Please select a valid patient from the suggestions');
                   return;
                 }
@@ -2308,9 +2366,28 @@ const ReceptionistDashboard = () => {
                 }
 
                 setOpdSubmitting(true);
+
+                // Two sequential calls to the two existing endpoints. The OPD is only
+                // attempted once the patient exists.
+                let patientId = opdForm.patientId;
+                if (isNewOpdPatient) {
+                  try {
+                    const created = await hospitalService.addPatient(
+                      stripPatientPayload(newPatientForm)
+                    );
+                    patientId = created?.id;
+                    if (!patientId) throw new Error('Patient was saved without an id');
+                  } catch (err) {
+                    console.error('Failed to create patient', err);
+                    toastError(extractApiError(err, 'Failed to create patient'));
+                    setOpdSubmitting(false);
+                    return;
+                  }
+                }
+
                 try {
                   const payload = {
-                    patientId: opdForm.patientId,
+                    patientId,
                     doctorId: opdForm.doctorId,
                     bp: opdForm.bp ? opdForm.bp : null,
                     temperature: opdForm.temperature ? parseFloat(opdForm.temperature) : null,
@@ -2342,89 +2419,140 @@ const ReceptionistDashboard = () => {
               }}
               className="p-6 space-y-4 max-h-[76vh] overflow-auto"
             >
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <div className="relative">
-                  <span className="block text-sm font-semibold text-neutral-700 mb-2">
-                    Patient <span className="text-red-600">*</span>
-                  </span>
-                  <div className="relative">
-                    <span className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-neutral-400">
-                      <svg
-                        className="w-5 h-5"
-                        fill="none"
-                        viewBox="0 0 24 24"
-                        stroke="currentColor"
-                      >
-                        <path
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                          strokeWidth={2}
-                          d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"
-                        />
-                      </svg>
-                    </span>
-                    <input
-                      type="text"
-                      className="input-field pl-10"
-                      value={patientSearchText}
-                      onChange={(e) => {
-                        const val = e.target.value;
-                        setPatientSearchText(val);
-                        setShowPatientDropdown(true);
-                        setOpdForm((prev) => ({ ...prev, patientId: null }));
-                      }}
-                      onFocus={() => setShowPatientDropdown(true)}
-                      onBlur={() => {
-                        setTimeout(() => {
-                          setShowPatientDropdown(false);
-                        }, 250);
-                      }}
-                      placeholder="Type at least 3 letters to search patient..."
-                      autoComplete="off"
-                    />
-                  </div>
-
-                  {showPatientSuggestions && (
-                    <div className="absolute left-0 right-0 mt-1 bg-white border border-neutral-200 rounded-xl shadow-xl z-50 max-h-60 overflow-y-auto divide-y divide-neutral-100 animate-scale-in">
-                      {filteredPatientsForOpd.length > 0 ? (
-                        filteredPatientsForOpd.map((p) => (
-                          <button
-                            type="button"
-                            key={p.id}
-                            onMouseDown={() => {
-                              setOpdForm((prev) => ({ ...prev, patientId: p.id }));
-                              setPatientSearchText(
-                                `${p.name}${p.phone ? ` (${p.phone})` : ''}${p.customId ? ` [${p.customId}]` : ''}`
-                              );
-                              setShowPatientDropdown(false);
-                            }}
-                            className="w-full px-4 py-3 hover:bg-neutral-50 cursor-pointer transition-colors duration-150 flex flex-col gap-0.5 text-left"
-                          >
-                            <div className="flex justify-between items-center">
-                              <span className="font-semibold text-neutral-800 text-sm">
-                                {p.name}
-                              </span>
-                              {p.customId && (
-                                <span className="text-[10px] font-bold px-2 py-0.5 bg-neutral-100 text-neutral-600 rounded-full tracking-wide">
-                                  {p.customId}
-                                </span>
-                              )}
-                            </div>
-                            <div className="flex gap-4 text-xs text-neutral-500">
-                              {p.phone && <span>📞 {p.phone}</span>}
-                              {p.gender && <span>👤 {p.gender}</span>}
-                              {p.age && <span>🎂 {p.age} Yrs</span>}
-                            </div>
-                          </button>
-                        ))
-                      ) : (
-                        <div className="px-4 py-4 text-sm text-neutral-500 text-center">
-                          No matching patients found
-                        </div>
-                      )}
-                    </div>
-                  )}
+              {canCreatePatient && (
+                <div
+                  className="inline-flex p-1 bg-neutral-100 rounded-xl"
+                  role="group"
+                  aria-label="Patient source"
+                >
+                  <button
+                    type="button"
+                    aria-pressed={opdPatientMode === 'existing'}
+                    onClick={() => setOpdPatientMode('existing')}
+                    className={`px-4 py-1.5 text-xs font-bold rounded-lg transition-colors ${
+                      opdPatientMode === 'existing'
+                        ? 'bg-white text-neutral-900 shadow-sm'
+                        : 'text-neutral-500 hover:text-neutral-700'
+                    }`}
+                  >
+                    Existing Patient
+                  </button>
+                  <button
+                    type="button"
+                    aria-pressed={opdPatientMode === 'new'}
+                    onClick={() => {
+                      setOpdPatientMode('new');
+                      setShowPatientDropdown(false);
+                      // Drop any patient picked by search, so only one of the two
+                      // sources is ever in play.
+                      setPatientSearchText('');
+                      setOpdForm((prev) => ({ ...prev, patientId: null }));
+                    }}
+                    className={`px-4 py-1.5 text-xs font-bold rounded-lg transition-colors ${
+                      opdPatientMode === 'new'
+                        ? 'bg-white text-neutral-900 shadow-sm'
+                        : 'text-neutral-500 hover:text-neutral-700'
+                    }`}
+                  >
+                    New Patient
+                  </button>
                 </div>
+              )}
+              {isNewOpdPatient && (
+                <div className="border border-neutral-200 rounded-xl p-4 space-y-4 bg-neutral-50/40">
+                  <p className="text-sm font-semibold text-neutral-800">New Patient Details</p>
+                  <PatientFormFields
+                    values={newPatientForm}
+                    errors={newPatientErrors}
+                    onChange={handleNewPatientChange}
+                  />
+                </div>
+              )}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                {!isNewOpdPatient && (
+                  <div className="relative">
+                    <span className="block text-sm font-semibold text-neutral-700 mb-2">
+                      Patient <span className="text-red-600">*</span>
+                    </span>
+                    <div className="relative">
+                      <span className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-neutral-400">
+                        <svg
+                          className="w-5 h-5"
+                          fill="none"
+                          viewBox="0 0 24 24"
+                          stroke="currentColor"
+                        >
+                          <path
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            strokeWidth={2}
+                            d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"
+                          />
+                        </svg>
+                      </span>
+                      <input
+                        type="text"
+                        className="input-field pl-10"
+                        value={patientSearchText}
+                        onChange={(e) => {
+                          const val = e.target.value;
+                          setPatientSearchText(val);
+                          setShowPatientDropdown(true);
+                          setOpdForm((prev) => ({ ...prev, patientId: null }));
+                        }}
+                        onFocus={() => setShowPatientDropdown(true)}
+                        onBlur={() => {
+                          setTimeout(() => {
+                            setShowPatientDropdown(false);
+                          }, 250);
+                        }}
+                        placeholder="Type at least 3 letters to search patient..."
+                        autoComplete="off"
+                      />
+                    </div>
+
+                    {showPatientSuggestions && (
+                      <div className="absolute left-0 right-0 mt-1 bg-white border border-neutral-200 rounded-xl shadow-xl z-50 max-h-60 overflow-y-auto divide-y divide-neutral-100 animate-scale-in">
+                        {filteredPatientsForOpd.length > 0 ? (
+                          filteredPatientsForOpd.map((p) => (
+                            <button
+                              type="button"
+                              key={p.id}
+                              onMouseDown={() => {
+                                setOpdForm((prev) => ({ ...prev, patientId: p.id }));
+                                setPatientSearchText(
+                                  `${p.name}${p.phone ? ` (${p.phone})` : ''}${p.customId ? ` [${p.customId}]` : ''}`
+                                );
+                                setShowPatientDropdown(false);
+                              }}
+                              className="w-full px-4 py-3 hover:bg-neutral-50 cursor-pointer transition-colors duration-150 flex flex-col gap-0.5 text-left"
+                            >
+                              <div className="flex justify-between items-center">
+                                <span className="font-semibold text-neutral-800 text-sm">
+                                  {p.name}
+                                </span>
+                                {p.customId && (
+                                  <span className="text-[10px] font-bold px-2 py-0.5 bg-neutral-100 text-neutral-600 rounded-full tracking-wide">
+                                    {p.customId}
+                                  </span>
+                                )}
+                              </div>
+                              <div className="flex gap-4 text-xs text-neutral-500">
+                                {p.phone && <span>📞 {p.phone}</span>}
+                                {p.gender && <span>👤 {p.gender}</span>}
+                                {p.age && <span>🎂 {p.age} Yrs</span>}
+                              </div>
+                            </button>
+                          ))
+                        ) : (
+                          <div className="px-4 py-4 text-sm text-neutral-500 text-center">
+                            No matching patients found
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
                 <div>
                   <span className="block text-sm font-semibold text-neutral-700 mb-2">Doctor</span>
                   {doctors && doctors.length === 1 ? (
