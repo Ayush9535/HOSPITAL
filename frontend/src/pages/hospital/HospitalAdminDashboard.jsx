@@ -1,5 +1,4 @@
 import { createColumnHelper } from '@tanstack/react-table';
-import FollowUpPanel from '../../components/FollowUpPanel';
 import React, { useState, useEffect, useCallback } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
@@ -18,11 +17,13 @@ import {
   Cell,
 } from 'recharts';
 import ActionMenu from '../../components/ActionMenu';
+import AdminOverviewAnalytics from '../../components/AdminOverviewAnalytics';
 import AppointmentModal from '../../components/AppointmentModal';
 import ConfirmationModal from '../../components/ConfirmationModal';
 import DataTable from '../../components/DataTable';
 import DateSelect from '../../components/DateSelect';
 import EmptyState from '../../components/EmptyState';
+import FollowUpPanel from '../../components/FollowUpPanel';
 import HistoryDrawer from '../../components/HistoryDrawer';
 import HospitalInventoryTab from '../../components/HospitalInventoryTab';
 import InClinicPresetsManager from '../../components/InClinicPresetsManager';
@@ -64,9 +65,10 @@ import reportsApi from '../../services/pharmacy/reportsApi';
 import salesApi from '../../services/pharmacy/salesApi';
 import timeSlotService from '../../services/timeSlotService';
 import wardService from '../../services/wardService';
-import { extractApiError } from '../../utils/apiError';
-import { describeShift, isOnShiftNow } from '../../utils/nurseShift';
+import { safeLoadMessage, extractApiError } from '../../utils/apiError';
 import { backdropProps } from '../../utils/modalA11y';
+import { describeShift, isOnShiftNow } from '../../utils/nurseShift';
+import { createOptionalModuleFetcher } from '../../utils/optionalModule';
 import { printHtml } from '../../utils/printHtml';
 import { printPdf, printBlob } from '../../utils/printPdf';
 import { validateForm } from '../../utils/validation';
@@ -83,7 +85,6 @@ import OtPoliciesCard from './OtPoliciesCard';
 import OtRoomsCard from './OtRoomsCard';
 import BillingHistoryView from './pharmacy/BillingHistoryView';
 import SuppliersView from './pharmacy/SuppliersView';
-import { createOptionalModuleFetcher } from '../../utils/optionalModule';
 import PrintPaymentSettingsCard from './PrintPaymentSettingsCard';
 import ScoreSettingsCard from './ScoreSettingsCard';
 import TimeSlotsView from './TimeSlotsView';
@@ -111,7 +112,7 @@ import WardsAndBeds from './WardsAndBeds';
  */
 const LoadFailureNotice = ({ message, onRetry }) => (
   <div className="p-8 text-center" role="alert">
-    <p className="text-sm font-bold text-gray-900">Couldn't load this list</p>
+    <p className="text-sm font-bold text-gray-900">Couldn&apos;t load this list</p>
     <p className="mt-1 text-sm text-gray-600">{message}</p>
     <p className="mt-1 text-xs text-gray-500">This is not the same as having no records.</p>
     <button
@@ -134,6 +135,11 @@ const HospitalAdminDashboard = () => {
   // Tenant-aware label: clinic logins say "Clinic" wherever we'd otherwise say "Hospital".
   const tenantWord = user?.hospitalType === 'CLINIC' ? 'Clinic' : 'Hospital';
   const isPharmacyTenant = user?.hospitalType === 'PHARMACY';
+  // The analytics endpoint is HOSPITAL-only and is not aliased for the other tenant types.
+  // Framed as "not one of the others" to match apiService, which rewrites /hospital/** only for
+  // an explicit CLINIC or PHARMACY session: a session with no hospitalType claim keeps the
+  // hospital namespace and reaches the endpoint, so it belongs on the analytics path too.
+  const isHospitalTenant = user?.hospitalType !== 'CLINIC' && user?.hospitalType !== 'PHARMACY';
   const pharmacyMode = modules.includes('MULTI_PHARMACY')
     ? 'MULTI'
     : modules.includes('SINGLE_PHARMACIST_ADMIN')
@@ -1640,7 +1646,7 @@ const HospitalAdminDashboard = () => {
         try {
           await hospitalService.deleteAppointment(id);
           success('Appointment deleted successfully');
-          loadData(); // Reload all or specific tab?
+          loadData(page, pageSize, !(activeTab === 'overview' && isHospitalTenant));
         } catch (err) {
           toastError('Failed to delete appointment');
         }
@@ -1655,8 +1661,9 @@ const HospitalAdminDashboard = () => {
     try {
       await hospitalService.updateAppointmentStatus(id, newStatus);
       success(`Appointment ${newStatus.toLowerCase()} successfully`);
-      if (activeTab === 'appointments' || activeTab === 'overview') loadData();
-      else if (activeTab === 'dashboard') loadData();
+      if (activeTab === 'appointments' || activeTab === 'overview') {
+        loadData(page, pageSize, !(activeTab === 'overview' && isHospitalTenant));
+      } else if (activeTab === 'dashboard') loadData();
     } catch (err) {
       toastError(`Failed to update appointment status`);
     }
@@ -1676,8 +1683,9 @@ const HospitalAdminDashboard = () => {
             await hospitalService.updateAppointmentStatus(id, newStatus);
             success('Appointment cancelled successfully');
             // refresh
-            if (activeTab === 'appointments' || activeTab === 'overview') loadData();
-            else if (activeTab === 'dashboard') loadData();
+            if (activeTab === 'appointments' || activeTab === 'overview') {
+              loadData(page, pageSize, !(activeTab === 'overview' && isHospitalTenant));
+            } else if (activeTab === 'dashboard') loadData();
           } catch (err) {
             toastError('Failed to cancel appointment');
           }
@@ -2561,127 +2569,147 @@ const HospitalAdminDashboard = () => {
             activeTab === 'overview' &&
             !loading && (
               <div className="space-y-6">
-                <h2 className="text-2xl font-bold text-gray-900">Overview</h2>
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-                  <div className="bg-white rounded-lg border border-gray-200 p-6">
-                    <div className="flex justify-between items-center">
-                      <div>
-                        <p className="text-gray-600 text-sm font-medium">
-                          Total Registered Patients
-                        </p>
-                        <h3 className="text-3xl font-bold text-gray-900 mt-1">
-                          {stats.totalRegisteredPatients || stats.totalPatients || 0}
-                        </h3>
+                {/* A clinic reaches this same dashboard, but the analytics endpoint is HOSPITAL-only
+                    and apiService rewrites /hospital/** to /clinic/** for a clinic session, so the
+                    request would not even reach it. Clinics therefore keep the Overview they had. */}
+                {isHospitalTenant ? (
+                  <AdminOverviewAnalytics />
+                ) : (
+                  <>
+                    <h2 className="text-2xl font-bold text-gray-900">Overview</h2>
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                      <div className="bg-white rounded-lg border border-gray-200 p-6">
+                        <div className="flex justify-between items-center">
+                          <div>
+                            <p className="text-gray-600 text-sm font-medium">
+                              Total Registered Patients
+                            </p>
+                            <h3 className="text-3xl font-bold text-gray-900 mt-1">
+                              {stats.totalRegisteredPatients || stats.totalPatients || 0}
+                            </h3>
+                          </div>
+                        </div>
+                      </div>
+                      <div className="bg-white rounded-lg border border-gray-200 p-6">
+                        <div className="flex justify-between items-center">
+                          <div>
+                            <p className="text-gray-600 text-sm font-medium">Patients This Month</p>
+                            <h3 className="text-3xl font-bold text-gray-900 mt-1">
+                              {stats.patientsThisMonth || 0}
+                            </h3>
+                          </div>
+                        </div>
+                      </div>
+                      <div className="bg-white rounded-lg border border-gray-200 p-6">
+                        <div className="flex justify-between items-center">
+                          <div>
+                            <p className="text-gray-600 text-sm font-medium">Patients Today</p>
+                            <h3 className="text-3xl font-bold text-gray-900 mt-1">
+                              {stats.patientsToday || 0}
+                            </h3>
+                          </div>
+                        </div>
                       </div>
                     </div>
-                  </div>
-                  <div className="bg-white rounded-lg border border-gray-200 p-6">
-                    <div className="flex justify-between items-center">
-                      <div>
-                        <p className="text-gray-600 text-sm font-medium">Patients This Month</p>
-                        <h3 className="text-3xl font-bold text-gray-900 mt-1">
-                          {stats.patientsThisMonth || 0}
-                        </h3>
-                      </div>
-                    </div>
-                  </div>
-                  <div className="bg-white rounded-lg border border-gray-200 p-6">
-                    <div className="flex justify-between items-center">
-                      <div>
-                        <p className="text-gray-600 text-sm font-medium">Patients Today</p>
-                        <h3 className="text-3xl font-bold text-gray-900 mt-1">
-                          {stats.patientsToday || 0}
-                        </h3>
-                      </div>
-                    </div>
-                  </div>
-                </div>
+                  </>
+                )}
 
-                <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 mt-8">
-                  {/* Left Div: Patients */}
-                  <div className="bg-white rounded-2xl border border-neutral-200 overflow-hidden shadow-sm flex flex-col">
-                    {/* Head */}
-                    <div className="px-6 py-5 border-b border-neutral-100 bg-neutral-50/50 flex flex-row justify-between items-center">
-                      <div>
-                        <h3 className="text-lg font-bold text-slate-800">Patients</h3>
-                        <p className="text-xs text-slate-500 mt-0.5">
-                          Manage registered hospital patients
-                        </p>
-                      </div>
-                      {user?.role === 'HOSPITAL_ADMIN' && (
-                        <button
-                          onClick={() => handleAdd('patients')}
-                          className="bg-sky-600 hover:bg-sky-700 text-white px-4 py-2 rounded-xl text-sm font-semibold shadow-sm transform hover:-translate-y-0.5 transition-all flex items-center gap-1.5"
-                        >
-                          <svg
-                            xmlns="http://www.w3.org/2000/svg"
-                            className="h-4 w-4"
-                            viewBox="0 0 20 20"
-                            fill="currentColor"
-                          >
-                            <path
-                              fillRule="evenodd"
-                              d="M10 3a1 1 0 011 1v5h5a1 1 0 110 2h-5v5a1 1 0 11-2 0v-5H4a1 1 0 110-2h5V4a1 1 0 011-1z"
-                              clipRule="evenodd"
+                <div
+                  className={
+                    isHospitalTenant
+                      ? 'grid grid-cols-1 gap-8 mt-8'
+                      : 'grid grid-cols-1 lg:grid-cols-2 gap-8 mt-8'
+                  }
+                >
+                  {!isHospitalTenant && (
+                    <>
+                      {/* Left Div: Patients */}
+                      <div className="bg-white rounded-2xl border border-neutral-200 overflow-hidden shadow-sm flex flex-col">
+                        {/* Head */}
+                        <div className="px-6 py-5 border-b border-neutral-100 bg-neutral-50/50 flex flex-row justify-between items-center">
+                          <div>
+                            <h3 className="text-lg font-bold text-slate-800">Patients</h3>
+                            <p className="text-xs text-slate-500 mt-0.5">
+                              Manage registered hospital patients
+                            </p>
+                          </div>
+                          {user?.role === 'HOSPITAL_ADMIN' && (
+                            <button
+                              onClick={() => handleAdd('patients')}
+                              className="bg-sky-600 hover:bg-sky-700 text-white px-4 py-2 rounded-xl text-sm font-semibold shadow-sm transform hover:-translate-y-0.5 transition-all flex items-center gap-1.5"
+                            >
+                              <svg
+                                xmlns="http://www.w3.org/2000/svg"
+                                className="h-4 w-4"
+                                viewBox="0 0 20 20"
+                                fill="currentColor"
+                              >
+                                <path
+                                  fillRule="evenodd"
+                                  d="M10 3a1 1 0 011 1v5h5a1 1 0 110 2h-5v5a1 1 0 11-2 0v-5H4a1 1 0 110-2h5V4a1 1 0 011-1z"
+                                  clipRule="evenodd"
+                                />
+                              </svg>
+                              <span>Add Patient</span>
+                            </button>
+                          )}
+                        </div>
+                        {/* Body */}
+                        <div className="p-6 flex-1">
+                          {/* Search Input for patients */}
+                          <div className="relative mb-4">
+                            <input
+                              type="text"
+                              placeholder="Search patients..."
+                              value={patientsSearchInput}
+                              onChange={(e) => setPatientsSearchInput(e.target.value)}
+                              className="pl-9 pr-4 py-2 border border-neutral-300 rounded-xl text-sm focus:ring-2 focus:ring-primary-500 focus:border-transparent w-full transition-all bg-neutral-50 focus:bg-white text-slate-800 placeholder-slate-400"
                             />
-                          </svg>
-                          <span>Add Patient</span>
-                        </button>
-                      )}
-                    </div>
-                    {/* Body */}
-                    <div className="p-6 flex-1">
-                      {/* Search Input for patients */}
-                      <div className="relative mb-4">
-                        <input
-                          type="text"
-                          placeholder="Search patients..."
-                          value={patientsSearchInput}
-                          onChange={(e) => setPatientsSearchInput(e.target.value)}
-                          className="pl-9 pr-4 py-2 border border-neutral-300 rounded-xl text-sm focus:ring-2 focus:ring-primary-500 focus:border-transparent w-full transition-all bg-neutral-50 focus:bg-white text-slate-800 placeholder-slate-400"
-                        />
-                        <span className="absolute left-3 top-2.5 text-slate-400">
-                          <svg
-                            xmlns="http://www.w3.org/2000/svg"
-                            className="h-4 w-4"
-                            fill="none"
-                            viewBox="0 0 24 24"
-                            stroke="currentColor"
-                          >
-                            <path
-                              strokeLinecap="round"
-                              strokeLinejoin="round"
-                              strokeWidth={2}
-                              d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"
+                            <span className="absolute left-3 top-2.5 text-slate-400">
+                              <svg
+                                xmlns="http://www.w3.org/2000/svg"
+                                className="h-4 w-4"
+                                fill="none"
+                                viewBox="0 0 24 24"
+                                stroke="currentColor"
+                              >
+                                <path
+                                  strokeLinecap="round"
+                                  strokeLinejoin="round"
+                                  strokeWidth={2}
+                                  d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"
+                                />
+                              </svg>
+                            </span>
+                          </div>
+                          {patients.length > 0 ? (
+                            <PatientsTable
+                              patients={patients}
+                              onEdit={(item) => handleEdit(item, 'patients')}
+                              onViewDetails={handleViewDetails}
+                              onDelete={handleDeletePatient}
+                              onHistory={(p) =>
+                                setPatientDetailsModal({ isOpen: true, patient: p })
+                              }
+                              startIndex={patientsPage * pageSize}
+                              pagination={patientsPagination}
+                              isAdmin={user?.role === 'HOSPITAL_ADMIN'}
                             />
-                          </svg>
-                        </span>
+                          ) : (
+                            <EmptyState
+                              icon={null}
+                              title="No Patients Found"
+                              message="There are no patients registered in the system yet."
+                              actionLabel="Add Patient"
+                              onAction={
+                                user?.role === 'HOSPITAL_ADMIN' ? () => handleAdd('patients') : null
+                              }
+                            />
+                          )}
+                        </div>
                       </div>
-                      {patients.length > 0 ? (
-                        <PatientsTable
-                          patients={patients}
-                          onEdit={(item) => handleEdit(item, 'patients')}
-                          onViewDetails={handleViewDetails}
-                          onDelete={handleDeletePatient}
-                          onHistory={(p) => setPatientDetailsModal({ isOpen: true, patient: p })}
-                          startIndex={patientsPage * pageSize}
-                          pagination={patientsPagination}
-                          isAdmin={user?.role === 'HOSPITAL_ADMIN'}
-                        />
-                      ) : (
-                        <EmptyState
-                          icon={null}
-                          title="No Patients Found"
-                          message="There are no patients registered in the system yet."
-                          actionLabel="Add Patient"
-                          onAction={
-                            user?.role === 'HOSPITAL_ADMIN' ? () => handleAdd('patients') : null
-                          }
-                        />
-                      )}
-                    </div>
-                  </div>
-
+                    </>
+                  )}
                   {/* Today's Appointments — operational appointment UI, so it renders only for a
                       tenant that holds the APPOINTMENTS module. Historical clinical data is a
                       different thing and is NOT hidden here: past appointments stay readable
@@ -2767,7 +2795,9 @@ const HospitalAdminDashboard = () => {
                             message="There are no appointments matching your search today."
                             actionLabel="Schedule Appointment"
                             onAction={
-                              user?.role === 'HOSPITAL_ADMIN' ? () => handleAdd('appointments') : null
+                              user?.role === 'HOSPITAL_ADMIN'
+                                ? () => handleAdd('appointments')
+                                : null
                             }
                           />
                         )}
@@ -3472,6 +3502,8 @@ const HospitalAdminDashboard = () => {
                     </div>
                   )}
 
+                  {/* eslint-disable-next-line jsx-a11y/aria-role -- `role` here is
+                      FollowUpPanel's own prop (the user's role), not an ARIA role. */}
                   {activeTab === 'follow-ups' && <FollowUpPanel role="HOSPITAL_ADMIN" />}
 
                   {activeTab === 'opd' &&
@@ -7660,11 +7692,17 @@ const AddModal = ({
           };
           if (type === 'patients') {
             if (isEdit)
-              await hospitalService.updatePatient(initialData.publicId || initialData.id, requestData);
+              await hospitalService.updatePatient(
+                initialData.publicId || initialData.id,
+                requestData
+              );
             else await hospitalService.addPatient(requestData);
           } else if (type === 'doctors') {
             if (isEdit)
-              await hospitalService.updateDoctor(initialData.publicId || initialData.id, requestData);
+              await hospitalService.updateDoctor(
+                initialData.publicId || initialData.id,
+                requestData
+              );
             else await hospitalService.addDoctor(requestData);
           } else if (type === 'receptionists') {
             if (isEdit)
@@ -7689,7 +7727,10 @@ const AddModal = ({
             else await hospitalService.addOtIncharge(requestData);
           } else if (type === 'nurses') {
             if (isEdit) {
-              await hospitalService.updateNurse(initialData.publicId || initialData.id, requestData);
+              await hospitalService.updateNurse(
+                initialData.publicId || initialData.id,
+                requestData
+              );
               // Reconcile the incharge's managed wards (Ward.inchargeNurseId).
               if (formData.isIncharge && Array.isArray(formData.inchargeWardIds)) {
                 const profileId = formData.nurseProfileId;
@@ -8569,7 +8610,7 @@ const AddModal = ({
                   <select
                     id="fld-62"
                     value={formData.patientId || ''}
-                      onChange={(e) => handleChange('patientId', e.target.value)}
+                    onChange={(e) => handleChange('patientId', e.target.value)}
                     className={`w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-transparent ${errors.patientId ? 'border-red-500' : 'border-gray-300'}`}
                   >
                     <option value="">Select Patient</option>
@@ -8961,7 +9002,9 @@ const NursesTable = ({
         const row = info.row.original;
         return (
           <div className="leading-tight">
-            <span className={row.shiftName || row.shiftStartTime ? 'text-gray-800' : 'text-gray-400'}>
+            <span
+              className={row.shiftName || row.shiftStartTime ? 'text-gray-800' : 'text-gray-400'}
+            >
               {describeShift(row)}
             </span>
             {isOnShiftNow(row) && (
@@ -9796,16 +9839,18 @@ const PharmaciesTab = () => {
               </tr>
             ) : branchesError ? (
               <tr>
-                <td colSpan={6} className="py-16 text-center" role="alert">
-                  <p className="text-sm font-bold text-gray-900">Couldn't load branches</p>
-                  <p className="mt-1 text-sm text-gray-600">{branchesError}</p>
-                  <button
-                    type="button"
-                    onClick={load}
-                    className="mt-4 px-4 py-2 text-xs font-black uppercase tracking-widest bg-gray-900 text-white rounded"
-                  >
-                    Retry
-                  </button>
+                <td colSpan={6} className="py-16 text-center">
+                  <div role="alert">
+                    <p className="text-sm font-bold text-gray-900">Couldn&apos;t load branches</p>
+                    <p className="mt-1 text-sm text-gray-600">{branchesError}</p>
+                    <button
+                      type="button"
+                      onClick={load}
+                      className="mt-4 px-4 py-2 text-xs font-black uppercase tracking-widest bg-gray-900 text-white rounded"
+                    >
+                      Retry
+                    </button>
+                  </div>
                 </td>
               </tr>
             ) : branches.length > 0 ? (
