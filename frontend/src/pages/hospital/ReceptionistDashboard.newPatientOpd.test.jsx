@@ -207,6 +207,57 @@ describe('OPD modal — new patient flow', () => {
     );
   });
 
+  it('a failed OPD does not make the retry register the patient twice', async () => {
+    const user = userEvent.setup();
+    // The patient is created, then the OPD is refused. The modal stays open with everything
+    // still filled in, and the obvious next move is to press Create again.
+    hospitalService.createOpd
+      .mockRejectedValueOnce(new Error('OPD rejected'))
+      .mockResolvedValueOnce({ id: 101, caseId: 'OPD-101' });
+
+    await renderDashboard();
+    const modal = await openOpdModal(user);
+    const scope = within(modal);
+    await user.click(scope.getByRole('button', { name: 'New Patient' }));
+    await fillPatientFields(user, scope);
+    await user.type(scope.getByLabelText(/Problem \/ Reason/i), 'Fever');
+
+    await user.click(scope.getByRole('button', { name: /Create OPD/i }));
+    await waitFor(() => expect(hospitalService.createOpd).toHaveBeenCalledTimes(1));
+    expect(hospitalService.addPatient).toHaveBeenCalledTimes(1);
+
+    // The retry.
+    await user.click(scope.getByRole('button', { name: /Create OPD/i }));
+    await waitFor(() => expect(hospitalService.createOpd).toHaveBeenCalledTimes(2));
+
+    // Registering Neha a second time would leave two of her in the hospital's records, and
+    // nothing on the server would reject it.
+    expect(hospitalService.addPatient).toHaveBeenCalledTimes(1);
+    // Both attempts are for the patient who was actually created.
+    expect(hospitalService.createOpd.mock.calls[0][0]).toMatchObject({ patientId: 42 });
+    expect(hospitalService.createOpd.mock.calls[1][0]).toMatchObject({ patientId: 42 });
+  });
+
+  it('shows the created patient in the search box once the retry succeeds', async () => {
+    const user = userEvent.setup();
+    hospitalService.createOpd.mockRejectedValueOnce(new Error('OPD rejected'));
+
+    await renderDashboard();
+    const modal = await openOpdModal(user);
+    const scope = within(modal);
+    await user.click(scope.getByRole('button', { name: 'New Patient' }));
+    await fillPatientFields(user, scope);
+    await user.click(scope.getByRole('button', { name: /Create OPD/i }));
+    await waitFor(() => expect(hospitalService.createOpd).toHaveBeenCalledTimes(1));
+
+    // The form now describes someone who exists, not someone to create: the patient fields
+    // are gone and the search shows who the OPD will be filed against.
+    await waitFor(() =>
+      expect(scope.getByDisplayValue(/Neha Kulkarni \(9876543210\) \[PAT42\]/)).toBeInTheDocument()
+    );
+    expect(scope.queryByPlaceholderText(/full name/i)).not.toBeInTheDocument();
+  });
+
   it('does not submit an OPD when patient creation fails', async () => {
     hospitalService.addPatient.mockRejectedValue({
       response: { data: { error: 'Phone number must be 10 digits' } },

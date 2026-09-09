@@ -127,6 +127,9 @@ const ReceptionistDashboard = () => {
   const [isAddPatientModalOpen, setIsAddPatientModalOpen] = useState(false);
   const [isOpdModalOpen, setIsOpdModalOpen] = useState(false);
   const [opdSubmitting, setOpdSubmitting] = useState(false);
+  // setState is asynchronous; the ref closes the same-frame double-click window the state
+  // flag alone leaves open. Same guard as the admin OPD modal.
+  const opdInFlight = useRef(false);
   const [isIpdAdmitOpen, setIsIpdAdmitOpen] = useState(false);
   const [ipdOpdForAdmit, setIpdOpdForAdmit] = useState(null);
   const [ipdSubTab, setIpdSubTab] = useState('current'); // 'current' | 'requested'
@@ -2298,7 +2301,7 @@ const ReceptionistDashboard = () => {
             <form
               onSubmit={async (e) => {
                 e.preventDefault();
-                if (opdSubmitting) return;
+                if (opdSubmitting || opdInFlight.current) return;
                 // Every check runs before any request, so a bad vitals value can never leave a
                 // patient created with no OPD behind it.
                 if (isNewOpdPatient) {
@@ -2365,6 +2368,9 @@ const ReceptionistDashboard = () => {
                   return;
                 }
 
+                // Claimed here, after every validation return above, so a rejected form can
+                // never strand the flag and block all later submits.
+                opdInFlight.current = true;
                 setOpdSubmitting(true);
 
                 // Two sequential calls to the two existing endpoints. The OPD is only
@@ -2377,9 +2383,20 @@ const ReceptionistDashboard = () => {
                     );
                     patientId = created?.id;
                     if (!patientId) throw new Error('Patient was saved without an id');
+                    // The patient is committed the moment this resolves, so the form stops
+                    // describing someone to create and starts describing someone who exists.
+                    // Without this, a failed OPD below leaves the modal open still in "new"
+                    // mode, and the obvious retry registers the same person a second time —
+                    // nothing on the server rejects that, so the duplicate is permanent.
+                    setOpdForm((prev) => ({ ...prev, patientId }));
+                    setOpdPatientMode('existing');
+                    setPatientSearchText(
+                      `${created.name}${created.phone ? ` (${created.phone})` : ''}${created.customId ? ` [${created.customId}]` : ''}`
+                    );
                   } catch (err) {
                     console.error('Failed to create patient', err);
                     toastError(extractApiError(err, 'Failed to create patient'));
+                    opdInFlight.current = false;
                     setOpdSubmitting(false);
                     return;
                   }
@@ -2414,6 +2431,7 @@ const ReceptionistDashboard = () => {
                   console.error('Failed to create OPD', err);
                   toastError('Failed to create OPD');
                 } finally {
+                  opdInFlight.current = false;
                   setOpdSubmitting(false);
                 }
               }}

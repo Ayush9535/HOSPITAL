@@ -165,6 +165,58 @@ describe('Admin OPD modal — new patient', () => {
     );
   });
 
+  it('a failed OPD does not make the retry register the patient twice', async () => {
+    const user = userEvent.setup();
+    hospitalService.createOpd
+      .mockRejectedValueOnce(new Error('OPD rejected'))
+      .mockResolvedValueOnce({ id: 101, caseId: 'OPD-101' });
+
+    await renderOpdTab();
+    const scope = within(await openOpdModal(user));
+    await user.click(scope.getByRole('button', { name: 'New Patient' }));
+    await fillPatientFields(user, scope);
+
+    await user.click(scope.getByRole('button', { name: /Create OPD Case/i }));
+    await waitFor(() => expect(hospitalService.createOpd).toHaveBeenCalledTimes(1));
+    expect(hospitalService.addPatient).toHaveBeenCalledTimes(1);
+
+    await user.click(scope.getByRole('button', { name: /Create OPD Case/i }));
+    await waitFor(() => expect(hospitalService.createOpd).toHaveBeenCalledTimes(2));
+
+    // The retry files a second OPD attempt for the patient already created — it does not
+    // register her again.
+    expect(hospitalService.addPatient).toHaveBeenCalledTimes(1);
+    expect(hospitalService.createOpd.mock.calls[0][0]).toMatchObject({ patientId: 42 });
+    expect(hospitalService.createOpd.mock.calls[1][0]).toMatchObject({ patientId: 42 });
+  });
+
+  it('a second click while the first submit is still in flight creates nothing extra', async () => {
+    const user = userEvent.setup();
+    // Hold the first OPD request open so both clicks are genuinely concurrent.
+    let releaseOpd;
+    hospitalService.createOpd.mockImplementationOnce(
+      () => new Promise((resolve) => (releaseOpd = () => resolve({ id: 102, caseId: 'OPD-102' })))
+    );
+
+    await renderOpdTab();
+    const scope = within(await openOpdModal(user));
+    await user.click(scope.getByRole('button', { name: 'New Patient' }));
+    await fillPatientFields(user, scope);
+
+    const submit = scope.getByRole('button', { name: /Create OPD Case/i });
+    await user.click(submit);
+    await waitFor(() => expect(hospitalService.addPatient).toHaveBeenCalledTimes(1));
+
+    // The impatient second click, while the first request has not answered.
+    await user.click(scope.getByRole('button', { name: /Creating|Create OPD Case/i }));
+
+    releaseOpd();
+    await waitFor(() => expect(hospitalService.createOpd).toHaveBeenCalledTimes(1));
+    // One patient, one OPD — not two of each.
+    expect(hospitalService.addPatient).toHaveBeenCalledTimes(1);
+    expect(hospitalService.createOpd).toHaveBeenCalledTimes(1);
+  });
+
   it('does not submit an OPD when patient creation fails', async () => {
     hospitalService.addPatient.mockRejectedValue({ response: { data: { error: 'Boom' } } });
     const user = userEvent.setup();

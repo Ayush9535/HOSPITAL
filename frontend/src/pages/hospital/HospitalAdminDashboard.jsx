@@ -1,5 +1,5 @@
 import { createColumnHelper } from '@tanstack/react-table';
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
   AreaChart,
@@ -338,6 +338,8 @@ const HospitalAdminDashboard = () => {
   });
   const { isOn, customs } = useEnabledVitals();
   const [adminOpdPatientSearch, setAdminOpdPatientSearch] = useState('');
+  const [adminOpdSubmitting, setAdminOpdSubmitting] = useState(false);
+  const adminOpdInFlight = useRef(false);
   const [adminOpdShowDropdown, setAdminOpdShowDropdown] = useState(false);
   // OPD "New Patient": the patient fields are rendered inline in this same OPD form, so one
   // submit registers the patient and opens their OPD. Same fields, same client rules and the
@@ -5917,6 +5919,18 @@ const HospitalAdminDashboard = () => {
 
                 // Two sequential calls to the two existing endpoints. The OPD is only
                 // attempted once the patient exists.
+                // Guard the async window only. Every validation return above is synchronous and
+                // happens before any request, so there is nothing to protect there — and putting
+                // the guard higher would strand the button disabled on a validation failure.
+                //
+                // A ref rather than the state flag alone: setState is asynchronous, so two clicks
+                // landing in the same frame would both read the old `false` and both submit. The
+                // ref flips synchronously and closes that window; the state drives the disabled
+                // attribute and the label.
+                if (adminOpdInFlight.current) return;
+                adminOpdInFlight.current = true;
+                setAdminOpdSubmitting(true);
+
                 let patientId = adminOpdForm.patientId;
                 if (isAdminNewOpdPatient) {
                   try {
@@ -5925,9 +5939,21 @@ const HospitalAdminDashboard = () => {
                     );
                     patientId = created?.id;
                     if (!patientId) throw new Error('Patient was saved without an id');
+                    // The patient is committed the moment this resolves, so the form stops
+                    // describing someone to create and starts describing someone who exists.
+                    // Without this, a failed OPD below leaves the modal open still in "new"
+                    // mode, and the obvious retry registers the same person a second time —
+                    // nothing on the server rejects that, so the duplicate is permanent.
+                    setAdminOpdForm((prev) => ({ ...prev, patientId }));
+                    setAdminOpdPatientMode('existing');
+                    setAdminOpdPatientSearch(
+                      `${created.name}${created.phone ? ` (${created.phone})` : ''}`
+                    );
                   } catch (err) {
                     console.error('Failed to create patient', err);
                     toastError(extractApiError(err, 'Failed to create patient'));
+                    adminOpdInFlight.current = false;
+                    setAdminOpdSubmitting(false);
                     return;
                   }
                 }
@@ -5977,6 +6003,11 @@ const HospitalAdminDashboard = () => {
                 } catch (err) {
                   console.error('Failed to create OPD', err);
                   toastError('Failed to create OPD case');
+                } finally {
+                  // Released on both paths, so a failure leaves the button usable for the retry
+                  // — which, thanks to the patient id persisted above, now creates only the OPD.
+                  adminOpdInFlight.current = false;
+                  setAdminOpdSubmitting(false);
                 }
               }}
               className="p-6 space-y-4 max-h-[76vh] overflow-auto"
@@ -6358,9 +6389,14 @@ const HospitalAdminDashboard = () => {
                 </button>
                 <button
                   type="submit"
-                  className="flex-1 py-2.5 rounded-xl bg-slate-900 text-white font-semibold hover:bg-slate-800 transition"
+                  disabled={adminOpdSubmitting}
+                  className={`flex-1 py-2.5 rounded-xl text-white font-semibold transition ${
+                    adminOpdSubmitting
+                      ? 'bg-gray-400 cursor-not-allowed'
+                      : 'bg-slate-900 hover:bg-slate-800'
+                  }`}
                 >
-                  Create OPD Case
+                  {adminOpdSubmitting ? 'Creating...' : 'Create OPD Case'}
                 </button>
               </div>
             </form>
