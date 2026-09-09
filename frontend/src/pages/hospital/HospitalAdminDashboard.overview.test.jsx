@@ -1,4 +1,4 @@
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
@@ -74,13 +74,18 @@ describe('Hospital Admin Overview composition', () => {
     // it; a second call site would be a route around the tenant check above.
     const srcRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
     const callers = [];
+    // withFileTypes returns each entry's kind from the directory read itself, so the type is
+    // never established by a second stat() on a path that could be something else by the time it
+    // is opened. Same files, one syscall, and no check-then-use pair for CodeQL to flag.
     const walk = (dir) => {
-      for (const entry of readdirSync(dir)) {
-        const full = join(dir, entry);
-        if (statSync(full).isDirectory()) {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const full = join(dir, entry.name);
+        if (entry.isDirectory()) {
           walk(full);
-        } else if (/\.(js|jsx)$/.test(entry) && !/\.test\./.test(entry)) {
-          if (readFileSync(full, 'utf8').includes('getDashboardOverview')) callers.push(entry);
+        } else if (/\.(js|jsx)$/.test(entry.name) && !/\.test\./.test(entry.name)) {
+          if (readFileSync(full, 'utf8').includes('getDashboardOverview')) {
+            callers.push(entry.name);
+          }
         }
       }
     };
