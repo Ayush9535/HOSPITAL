@@ -1,6 +1,6 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../services/patientDocumentService', () => ({
   default: {
@@ -40,6 +40,26 @@ const pdf = (name = 'report.pdf', size = 1024) => {
   const file = new File(['x'], name, { type: 'application/pdf' });
   Object.defineProperty(file, 'size', { value: size });
   return file;
+};
+
+/**
+ * Types the archive reason into the confirmation dialog and confirms.
+ *
+ * ConfirmationModal moves focus to its Cancel button 50ms after it opens (the BUG-039 focus
+ * trap). Typing the instant the dialog appears lets that timer steal the rest of the
+ * keystrokes, so the reason lands half-entered or empty, Confirm stays disabled, and the
+ * click is a silent no-op - which is what made this suite fail at random. Wait for focus to
+ * settle, then type, then check the value actually landed before confirming.
+ */
+const confirmWithReason = async (user, reason) => {
+  const dialog = await screen.findByRole('dialog');
+  await waitFor(() =>
+    expect(within(dialog).getByRole('button', { name: 'Cancel and close dialog' })).toHaveFocus()
+  );
+  const input = within(dialog).getByLabelText(/Reason/);
+  await user.type(input, reason);
+  await waitFor(() => expect(input).toHaveValue(reason));
+  await user.click(within(dialog).getByRole('button', { name: 'Confirm action' }));
 };
 
 describe('PatientDocumentsPanel', () => {
@@ -117,8 +137,7 @@ describe('PatientDocumentsPanel', () => {
     await screen.findByText('CBC report');
 
     await user.click(screen.getAllByRole('button', { name: 'Archive' })[0]);
-    await user.type(await screen.findByLabelText(/Reason/), 'Filed twice');
-    await user.click(await screen.findByRole('button', { name: 'Confirm action' }));
+    await confirmWithReason(user, 'Filed twice');
 
     const alert = await screen.findByRole('alert');
     expect(alert).toHaveTextContent(/showing what was last loaded/);
@@ -284,8 +303,7 @@ describe('PatientDocumentsPanel', () => {
     await screen.findByText('CBC report');
 
     await user.click(screen.getByRole('button', { name: 'Archive' }));
-    await user.type(await screen.findByLabelText(/Reason/), 'Wrong patient');
-    await user.click(await screen.findByRole('button', { name: 'Confirm action' }));
+    await confirmWithReason(user, 'Wrong patient');
 
     await waitFor(() =>
       expect(patientDocumentService.archive).toHaveBeenCalledWith('doc-1', 'Wrong patient')
@@ -303,8 +321,7 @@ describe('PatientDocumentsPanel', () => {
     await screen.findByText('CBC report');
 
     await user.click(screen.getByRole('button', { name: 'Archive' }));
-    await user.type(await screen.findByLabelText(/Reason/), 'Filed in error');
-    await user.click(await screen.findByRole('button', { name: 'Confirm action' }));
+    await confirmWithReason(user, 'Filed in error');
 
     const dialog = await screen.findByRole('dialog');
     expect(within(dialog).getByRole('alert')).toHaveTextContent('Only a doctor may archive');
