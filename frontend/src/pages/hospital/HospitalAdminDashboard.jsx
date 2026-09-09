@@ -1646,7 +1646,7 @@ const HospitalAdminDashboard = () => {
         try {
           await hospitalService.deleteAppointment(id);
           success('Appointment deleted successfully');
-          loadData(); // Reload all or specific tab?
+          loadData(page, pageSize, !(activeTab === 'overview' && isHospitalTenant));
         } catch (err) {
           toastError('Failed to delete appointment');
         }
@@ -1661,8 +1661,9 @@ const HospitalAdminDashboard = () => {
     try {
       await hospitalService.updateAppointmentStatus(id, newStatus);
       success(`Appointment ${newStatus.toLowerCase()} successfully`);
-      if (activeTab === 'appointments' || activeTab === 'overview') loadData();
-      else if (activeTab === 'dashboard') loadData();
+      if (activeTab === 'appointments' || activeTab === 'overview') {
+        loadData(page, pageSize, !(activeTab === 'overview' && isHospitalTenant));
+      } else if (activeTab === 'dashboard') loadData();
     } catch (err) {
       toastError(`Failed to update appointment status`);
     }
@@ -1682,8 +1683,9 @@ const HospitalAdminDashboard = () => {
             await hospitalService.updateAppointmentStatus(id, newStatus);
             success('Appointment cancelled successfully');
             // refresh
-            if (activeTab === 'appointments' || activeTab === 'overview') loadData();
-            else if (activeTab === 'dashboard') loadData();
+            if (activeTab === 'appointments' || activeTab === 'overview') {
+              loadData(page, pageSize, !(activeTab === 'overview' && isHospitalTenant));
+            } else if (activeTab === 'dashboard') loadData();
           } catch (err) {
             toastError('Failed to cancel appointment');
           }
