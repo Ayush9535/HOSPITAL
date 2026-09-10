@@ -217,7 +217,7 @@ export const buildConsentHtml = (f, hospital) => {
       </div>
 
       <div class="idrow" style="margin-top:12px">
-        ${fld('UHID No', hospital.customId)}
+        ${fld('UHID No', f.prnNo || '—')}
         ${fld('IPD No', f.ipdRegistrationNo)}
         ${fld('MLC No', '')}
         ${fld('Bed No', f.bedNo)}
