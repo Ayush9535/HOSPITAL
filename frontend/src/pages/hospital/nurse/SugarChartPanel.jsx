@@ -77,7 +77,7 @@ export const buildSugarChartHtml = (entries, f, hospital) => {
       <div class="head">${logo}<div class="hname">${hname}</div><div class="haddr">${esc(hospital.address)}</div><div class="title">SUGAR CHART</div></div>
       <div class="idbox">
         <div class="idrow">
-          <span><b>UHID No. :</b> <span class="flexval">${esc(hospital.customId)}</span></span>
+          <span><b>UHID No. :</b> <span class="flexval">${esc(f.prnNo) || '—'}</span></span>
           <span><b>IPD No. :</b> <span class="flexval">${esc(f.ipdRegistrationNo)}</span></span>
           <span><b>MLC No. :</b> <span class="flexval"></span></span>
         </div>

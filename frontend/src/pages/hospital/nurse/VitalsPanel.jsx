@@ -108,7 +108,7 @@ export const buildIoChartHtml = (rows, f, hospital, ioEntries) => {
       <div class="head">${logo}<div class="hname">${hname}</div><div class="haddr">${esch(hospital.address)}</div><div class="title">INPUT &amp; OUTPUT CHART</div></div>
       <div class="idbox">
         <div class="idrow">
-          <span><b>UHID No. :</b> <span class="flexval">${esch(hospital.customId)}</span></span>
+          <span><b>UHID No. :</b> <span class="flexval">${esch(f.prnNo) || '—'}</span></span>
           <span><b>IPD No. :</b> <span class="flexval">${esch(f.ipdRegistrationNo)}</span></span>
           <span><b>MLC No. :</b> <span class="flexval"></span></span>
           <span><b>Bed No. :</b> <span class="flexval">${esch(f.bedNo)}</span></span>

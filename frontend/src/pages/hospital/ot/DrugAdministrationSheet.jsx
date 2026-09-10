@@ -73,7 +73,7 @@ const buildPrintHtml = (data, prefill, hospital) => {
 
       <div class="idbox">
         <div class="idrow">
-          <span><b>UHID No. :</b> <span class="flexval">${esc(hospital.customId)}</span></span>
+          <span><b>UHID No. :</b> <span class="flexval">${esc(f.prnNo) || '—'}</span></span>
           <span><b>IPD No. :</b> <span class="flexval">${esc(f.ipdRegistrationNo)}</span></span>
           <span><b>MLC No. :</b> <span class="flexval">${esc(data.mlcNo)}</span></span>
           <span><b>Bed No. :</b> <span class="flexval">${esc(f.bedNo)}</span></span>
