@@ -156,6 +156,53 @@ public class Patient {
     private Boolean isActive = true;
 
     /**
+     * The exact phone number for which a member of staff acknowledged that this patient is a
+     * <b>different person</b> who legitimately shares a contact number with another active
+     * patient of the same hospital (a parent and child on one mobile, say).
+     *
+     * <p><b>Semantics — read this before changing anything that touches the field.</b> The value
+     * is the acknowledged phone number, not a flag. It means exactly:
+     *
+     * <blockquote>Staff explicitly confirmed that this patient is a different person who
+     * legitimately shares contact number X with another active patient.</blockquote>
+     *
+     * <p>It does <b>not</b> mean "disable duplicate checking for this patient". The exemption is
+     * therefore <b>value-bound</b>: it applies only while {@code duplicatePhoneAckFor} equals the
+     * patient's current {@link #phone}.
+     *
+     * <ul>
+     *   <li>acknowledged X, phone stays X → exempt</li>
+     *   <li>acknowledged X, phone changes to Y → <b>the exemption lapses</b>; Y is checked for
+     *       duplicates like any other number. An acknowledgement for X must NEVER exempt Y.</li>
+     *   <li>acknowledged X, phone changes to Y and later back to X → the acknowledgement for X
+     *       may become effective again: same tenant, same number, same acknowledged fact.</li>
+     * </ul>
+     *
+     * <p>A permanent boolean flag would fail the middle case — it would leave the row exempt from
+     * uniqueness forever, on a number nobody ever acknowledged. That is why this is a value and
+     * not a boolean.
+     *
+     * <p>Server-controlled. Set only by {@code PatientService} from the acknowledgement signal on
+     * the request; never bound from the request body (see the access annotation).
+     */
+    @com.fasterxml.jackson.annotation.JsonProperty(
+            access = com.fasterxml.jackson.annotation.JsonProperty.Access.READ_ONLY)
+    @Column(name = "duplicate_phone_ack_for", length = 15)
+    private String duplicatePhoneAckFor;
+
+    /** When the acknowledgement above was recorded. Server-controlled. */
+    @com.fasterxml.jackson.annotation.JsonProperty(
+            access = com.fasterxml.jackson.annotation.JsonProperty.Access.READ_ONLY)
+    @Column(name = "duplicate_phone_ack_at")
+    private LocalDateTime duplicatePhoneAckAt;
+
+    /** Email of the member of staff who acknowledged. Server-controlled. */
+    @com.fasterxml.jackson.annotation.JsonProperty(
+            access = com.fasterxml.jackson.annotation.JsonProperty.Access.READ_ONLY)
+    @Column(name = "duplicate_phone_ack_by", length = 100)
+    private String duplicatePhoneAckBy;
+
+    /**
      * Timestamp when the patient record was created
      */
     @CreationTimestamp

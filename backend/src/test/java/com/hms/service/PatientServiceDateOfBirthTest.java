@@ -25,6 +25,7 @@ class PatientServiceDateOfBirthTest {
     @Mock PatientRepository patientRepository;
     // The insert and the registration number live in PatientRegistrar now.
     @Mock com.hms.service.hospital.PatientRegistrar patientRegistrar;
+    @Mock com.hms.service.hospital.PatientDuplicateFinder patientDuplicateFinder;
     @Mock CacheManager cacheManager;
     @Mock SecurityContextHelper securityHelper;
     @Mock AuditLogService auditLogService;

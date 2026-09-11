@@ -2,9 +2,11 @@ import React, { useState, useEffect } from 'react';
 import { useToast } from '../context/ToastContext';
 import hospitalService from '../services/hospitalService';
 import { availableSlotsFor } from '../utils/appointmentSlots';
+import { extractPhoneConflicts } from '../utils/duplicatePhone';
 import { validateForm } from '../utils/validation';
 import DateSelect from './DateSelect';
 import DobPicker from './DobPicker';
+import DuplicatePhoneConflictModal from './DuplicatePhoneConflictModal';
 
 /**
  * AppointmentModal - Shared modal for creating appointments
@@ -14,6 +16,10 @@ const AppointmentModal = ({ isOpen, onClose, onSuccess, doctors, patients }) => 
   const [isNewPatient, setIsNewPatient] = useState(false);
   const [errors, setErrors] = useState({});
   const [submitting, setSubmitting] = useState(false);
+  // Active patients this hospital already has on the typed number. A parent and a child share
+  // one mobile, so booking against "the patient with this number" would file the child's
+  // appointment under the parent — reception chooses instead.
+  const [phoneConflicts, setPhoneConflicts] = useState(null);
   const { success, error: toastError } = useToast();
 
   // Custom Combobox State
@@ -24,7 +30,6 @@ const AppointmentModal = ({ isOpen, onClose, onSuccess, doctors, patients }) => 
   const [selectedSlot, setSelectedSlot] = useState(null);
   const [bookedSlots, setBookedSlots] = useState([]);
   const [loadingSlots, setLoadingSlots] = useState(false);
-
 
   // Get today's date and current time. Use LOCAL date parts (not toISOString, which is UTC and
   // can be a day off) so "today" matches the clinic's calendar day for slot filtering + the
@@ -138,8 +143,17 @@ const AppointmentModal = ({ isOpen, onClose, onSuccess, doctors, patients }) => 
     setShowPatientDropdown(false);
   };
 
-  const handleSubmit = async (e) => {
+  const handleSubmit = (e) => {
     e.preventDefault();
+    return submit();
+  };
+
+  /**
+   * @param overrides `patientId` books against an existing patient chosen from the conflict
+   *        list; `acknowledgeDuplicatePhone` books a genuinely different person onto the shared
+   *        number. Both come from an explicit click, never from a guess made here.
+   */
+  const submit = async ({ patientId, acknowledgeDuplicatePhone = false } = {}) => {
     if (submitting) return;
     setErrors({});
 
@@ -150,14 +164,16 @@ const AppointmentModal = ({ isOpen, onClose, onSuccess, doctors, patients }) => 
       appointmentTime: ['required'],
     };
 
-    if (isNewPatient) {
+    if (isNewPatient && !patientId) {
       Object.assign(rules, {
         patientName: ['required', 'name'],
         patientPhone: ['required', 'phone'],
         patientDateOfBirth: ['required', 'dob'],
         patientGender: ['required'],
       });
-    } else {
+    } else if (!patientId) {
+      // `patientId` here is the one picked from the duplicate-phone list, which is already a
+      // real patient — there is nothing for the form to supply.
       Object.assign(rules, {
         patientId: ['required'],
       });
@@ -176,14 +192,25 @@ const AppointmentModal = ({ isOpen, onClose, onSuccess, doctors, patients }) => 
 
     setSubmitting(true);
     try {
-      await hospitalService.createAppointment({
-        ...formData,
-        doctorId: Number(formData.doctorId),
-      });
+      await hospitalService.createAppointment(
+        {
+          ...formData,
+          ...(patientId ? { patientId } : {}),
+          doctorId: Number(formData.doctorId),
+        },
+        { acknowledgeDuplicatePhone }
+      );
       success('Appointment scheduled successfully');
+      setPhoneConflicts(null);
       onSuccess();
       onClose();
     } catch (err) {
+      const conflicts = extractPhoneConflicts(err);
+      if (conflicts) {
+        // Paused on a question, not failed. The form is untouched behind the chooser.
+        setPhoneConflicts(conflicts);
+        return; // the finally below clears `submitting`
+      }
       // Never pass an object to the toast: validation failures come back as { errors: {field: msg} }
       // and rendering that object crashes React (#31). Extract a plain string in every shape.
       const data = err.response?.data;
@@ -203,10 +230,24 @@ const AppointmentModal = ({ isOpen, onClose, onSuccess, doctors, patients }) => 
     setIsNewPatient(false);
     setFormData({});
     setErrors({});
+    setPhoneConflicts(null);
     onClose();
   };
 
   if (!isOpen) return null;
+
+  if (phoneConflicts) {
+    return (
+      <DuplicatePhoneConflictModal
+        isOpen
+        conflicts={phoneConflicts}
+        busy={submitting}
+        onUseExisting={(patient) => submit({ patientId: patient.id })}
+        onRegisterDifferent={() => submit({ acknowledgeDuplicatePhone: true })}
+        onCancel={() => setPhoneConflicts(null)}
+      />
+    );
+  }
 
   return (
     <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">

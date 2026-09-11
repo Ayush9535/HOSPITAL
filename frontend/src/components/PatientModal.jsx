@@ -2,14 +2,19 @@ import React, { useState, useEffect } from 'react';
 import { useToast } from '../context/ToastContext';
 import hospitalService from '../services/hospitalService';
 import { extractApiError } from '../utils/apiError';
+import { extractPhoneConflicts } from '../utils/duplicatePhone';
 import { validateForm } from '../utils/validation';
 import Button from './Button';
+import DuplicatePhoneConflictModal from './DuplicatePhoneConflictModal';
 import PatientFormFields, { patientFormRules, stripPatientPayload } from './PatientFormFields';
 
 const PatientModal = ({ isOpen, onClose, onSuccess, initialData }) => {
   const [formData, setFormData] = useState({});
   const [errors, setErrors] = useState({});
   const [isSubmitting, setIsSubmitting] = useState(false);
+  // The patients this mobile number already belongs to. Non-empty means the save is paused on a
+  // question only the user can answer, not that it failed.
+  const [phoneConflicts, setPhoneConflicts] = useState(null);
   const { success, error: toastError } = useToast();
   const isEdit = !!initialData;
 
@@ -22,6 +27,7 @@ const PatientModal = ({ isOpen, onClose, onSuccess, initialData }) => {
       }
       setErrors({});
       setIsSubmitting(false);
+      setPhoneConflicts(null);
     }
   }, [isOpen, initialData]);
 
@@ -32,8 +38,13 @@ const PatientModal = ({ isOpen, onClose, onSuccess, initialData }) => {
     }
   };
 
-  const handleSubmit = async (e) => {
-    e.preventDefault();
+  /**
+   * @param acknowledgeDuplicatePhone only ever true on the second attempt, after the user has
+   *        seen the existing patients on this number and pressed "Register Different Patient".
+   *        Never inferred: the whole point is that only a person at the desk can tell a parent
+   *        from a child on one mobile.
+   */
+  const save = async ({ acknowledgeDuplicatePhone = false } = {}) => {
     setErrors({});
     setIsSubmitting(true);
 
@@ -47,23 +58,32 @@ const PatientModal = ({ isOpen, onClose, onSuccess, initialData }) => {
     try {
       // Strip insurance field so it is not sent to backend/database
       const savePayload = stripPatientPayload(formData);
+      const options = { acknowledgeDuplicatePhone };
 
       let saved;
       if (isEdit) {
-        saved = await hospitalService.updatePatient(formData.id, savePayload);
+        saved = await hospitalService.updatePatient(formData.id, savePayload, options);
         success('Patient updated successfully');
         console.log('[PatientModal] Patient updated');
       } else {
-        saved = await hospitalService.addPatient(savePayload);
+        saved = await hospitalService.addPatient(savePayload, options);
         success('Patient added successfully');
         console.log('[PatientModal] Patient added, calling onSuccess');
       }
       // The saved patient is handed to the caller so a flow that needs it (the OPD
       // modal's "New Patient" option) can select it straight away. Callers that do
       // not take an argument are unaffected.
+      setPhoneConflicts(null);
       onSuccess(saved);
       onClose();
     } catch (err) {
+      const conflicts = extractPhoneConflicts(err);
+      if (conflicts) {
+        // Not a failure — a question. The form stays exactly as it is behind the chooser so
+        // whichever way the user answers, nothing has to be retyped.
+        setPhoneConflicts(conflicts);
+        return;
+      }
       console.error('Failed to save patient', err);
       toastError(extractApiError(err, 'Operation failed'));
     } finally {
@@ -71,7 +91,36 @@ const PatientModal = ({ isOpen, onClose, onSuccess, initialData }) => {
     }
   };
 
+  const handleSubmit = (e) => {
+    e.preventDefault();
+    return save();
+  };
+
+  /**
+   * "Use This Patient" — the person at the desk is one of the existing patients, so nothing new
+   * is created. The chosen patient is handed to the caller exactly as a save would have been,
+   * which is what lets an OPD or appointment flow continue against that record.
+   */
+  const handleUseExisting = (patient) => {
+    setPhoneConflicts(null);
+    onSuccess(patient);
+    onClose();
+  };
+
   if (!isOpen) return null;
+
+  if (phoneConflicts) {
+    return (
+      <DuplicatePhoneConflictModal
+        isOpen
+        conflicts={phoneConflicts}
+        busy={isSubmitting}
+        onUseExisting={handleUseExisting}
+        onRegisterDifferent={() => save({ acknowledgeDuplicatePhone: true })}
+        onCancel={() => setPhoneConflicts(null)}
+      />
+    );
+  }
 
   return (
     <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4">

@@ -25,6 +25,13 @@ import java.util.List;
 public class PatientService {
     private static final String HOSPITAL_NOT_FOUND = "Hospital not found";
 
+    /**
+     * Shown to the person at the desk, so it says what happened rather than what was rejected.
+     * Shared with the appointment path so both ways of registering a patient read the same.
+     */
+    static final String DUPLICATE_PHONE_MESSAGE =
+            "This mobile number is already registered to a patient at this hospital.";
+
 
     private static final Logger logger = LoggerFactory.getLogger(PatientService.class);
 
@@ -36,6 +43,9 @@ public class PatientService {
 
     @Autowired
     private PatientRegistrar patientRegistrar;
+
+    @Autowired
+    private PatientDuplicateFinder patientDuplicateFinder;
 
     @Autowired
     private org.springframework.cache.CacheManager cacheManager;
@@ -116,6 +126,61 @@ public class PatientService {
     }
 
     /**
+     * Stamps the value-bound acknowledgement onto a patient about to hold {@code phone}.
+     *
+     * <p>Stores the number itself, not a flag, so the exemption lapses by itself if the patient's
+     * phone later changes — an acknowledgement for X must never exempt Y. See
+     * {@code Patient.duplicatePhoneAckFor} for the full semantics.
+     */
+    private void recordAcknowledgement(Patient patient, String phone) {
+        patient.setDuplicatePhoneAckFor(phone);
+        patient.setDuplicatePhoneAckAt(java.time.LocalDateTime.now(java.time.ZoneId.systemDefault()));
+        patient.setDuplicatePhoneAckBy(securityHelper.getCurrentUserEmail());
+    }
+
+    /**
+     * Clears an acknowledgement that no longer describes the patient's number.
+     *
+     * <p>Strictly speaking redundant — every read of the acknowledgement compares it against the
+     * current phone, so a stale value grants nothing. It is cleared anyway because a record
+     * claiming staff acknowledged a number the patient does not have is a misleading audit trail.
+     */
+    private void clearStaleAcknowledgement(Patient patient) {
+        patient.setDuplicatePhoneAckFor(null);
+        patient.setDuplicatePhoneAckAt(null);
+        patient.setDuplicatePhoneAckBy(null);
+    }
+
+    /**
+     * Best-effort audit of a shared-number decision, with the number masked.
+     *
+     * <p>The three ack columns hold only the latest acknowledgement and are overwritten by the
+     * next one; this is the durable record of who decided what, and when. Masked because an audit
+     * trail should let you reconcile a record against a number someone is holding, not serve as a
+     * contact list.
+     */
+    private void auditDuplicatePhoneAcknowledgement(Patient saved, String phone,
+            List<com.hms.dto.DuplicatePatientMatch> conflicts, Long hospitalId) {
+        try {
+            String existing = conflicts.stream()
+                    .map(c -> c.customId() != null ? c.customId() : String.valueOf(c.id()))
+                    .collect(java.util.stream.Collectors.joining(", "));
+            auditLogService.logAction(
+                    "PATIENT_DUPLICATE_PHONE_ACKNOWLEDGED",
+                    "Registered as a different person sharing phone "
+                            + PatientDuplicateFinder.maskPhone(phone)
+                            + " with existing patient(s): " + existing,
+                    securityHelper.getCurrentUserEmail(),
+                    hospitalId,
+                    "PATIENT",
+                    saved.getPublicId(),
+                    "Shared phone acknowledged by staff");
+        } catch (Exception e) {
+            logger.warn("Failed to create audit log for duplicate-phone acknowledgement", e);
+        }
+    }
+
+    /**
      * "Always required" for dateOfBirth is enforced here rather than at the
      * DB/entity level — see the comment on Patient.dateOfBirth for why.
      */
@@ -146,6 +211,17 @@ public class PatientService {
      * patient commit first and leaves the audit in a transaction of its own.
      */
     public Patient addPatient(Patient patient) {
+        return addPatient(patient, false);
+    }
+
+    /**
+     * @param acknowledgeDuplicatePhone the caller has been shown the existing patients on this
+     *                                  number and has explicitly stated that this registration is
+     *                                  a different person. Never inferred, never defaulted to
+     *                                  true: the whole point is that only a human can tell a
+     *                                  parent from a child on one mobile.
+     */
+    public Patient addPatient(Patient patient, boolean acknowledgeDuplicatePhone) {
         // Validate phone number
         if (patient.getPhone() == null || !patient.getPhone().matches("^[0-9]{10}$")) {
             throw new IllegalArgumentException("Phone number must be exactly 10 digits");
@@ -162,8 +238,35 @@ public class PatientService {
         // Set hospital_id to ensure multi-tenant isolation
         patient.setHospitalId(hospitalId);
 
+        // The acknowledgement is server-controlled. Whatever arrived on the request body is
+        // discarded here, before anything can read it: the fields are also non-bindable through
+        // Jackson, and this is the second lock on the same door.
+        patient.setDuplicatePhoneAckFor(null);
+        patient.setDuplicatePhoneAckAt(null);
+        patient.setDuplicatePhoneAckBy(null);
+
+        // Asked before the insert, and never answered automatically. A single match is NOT
+        // grounds for reusing that patient: a parent and a child share one mobile, and silently
+        // attaching the child's record to the parent is a clinical-safety failure, not a
+        // convenience.
+        List<com.hms.dto.DuplicatePatientMatch> conflicts =
+                patientDuplicateFinder.findActiveByPhone(hospitalId, patient.getPhone(), null);
+        if (!conflicts.isEmpty() && !acknowledgeDuplicatePhone) {
+            throw new com.hms.exception.DuplicatePhoneConflictException(
+                    DUPLICATE_PHONE_MESSAGE, conflicts);
+        }
+        boolean acknowledged = !conflicts.isEmpty() && acknowledgeDuplicatePhone;
+        if (acknowledged) {
+            recordAcknowledgement(patient, patient.getPhone());
+        }
+
         logger.info("Hospital {} creating new patient: {}", hospitalId, LogSanitizer.clean(patient.getName()));
         Patient savedPatient = patientRegistrar.persistNewPatient(patient);
+
+        if (acknowledged) {
+            auditDuplicatePhoneAcknowledgement(savedPatient, patient.getPhone(), conflicts,
+                    hospitalId);
+        }
 
         evictStatsCache(hospitalId);
 
@@ -201,6 +304,16 @@ public class PatientService {
      * @return Updated Patient entity
      */
     public Patient updatePatient(Long publicId, Patient updatedData) {
+        return updatePatient(publicId, updatedData, false);
+    }
+
+    /**
+     * @param acknowledgeDuplicatePhone as on {@link #addPatient(Patient, boolean)} — staff have
+     *                                  seen the existing patients on the new number and confirmed
+     *                                  this is a different person.
+     */
+    public Patient updatePatient(Long publicId, Patient updatedData,
+            boolean acknowledgeDuplicatePhone) {
         // Validate phone number
         if (updatedData.getPhone() == null || !updatedData.getPhone().matches("^[0-9]{10}$")) {
             throw new IllegalArgumentException("Phone number must be exactly 10 digits");
@@ -211,6 +324,29 @@ public class PatientService {
 
         validateDateOfBirth(updatedData.getDateOfBirth());
 
+        // A phone change is a second way to create a duplicate, and until now the only one that
+        // was not checked at all: register B on a free number, then edit B onto A's number.
+        String newPhone = updatedData.getPhone();
+        boolean phoneChanged = !newPhone.equals(existingPatient.getPhone());
+        List<com.hms.dto.DuplicatePatientMatch> acknowledgedConflicts = List.of();
+        if (phoneChanged) {
+            // An acknowledgement made for the OLD number says nothing about the new one, so it
+            // cannot carry over. Cleared before the check, not after, so it can never suppress it.
+            clearStaleAcknowledgement(existingPatient);
+
+            List<com.hms.dto.DuplicatePatientMatch> conflicts = patientDuplicateFinder
+                    .findActiveByPhone(existingPatient.getHospitalId(), newPhone,
+                            existingPatient.getId());
+            if (!conflicts.isEmpty()) {
+                if (!acknowledgeDuplicatePhone) {
+                    throw new com.hms.exception.DuplicatePhoneConflictException(
+                            DUPLICATE_PHONE_MESSAGE, conflicts);
+                }
+                recordAcknowledgement(existingPatient, newPhone);
+                acknowledgedConflicts = conflicts;
+            }
+        }
+
         existingPatient.setName(updatedData.getName());
         existingPatient.setDateOfBirth(updatedData.getDateOfBirth());
         existingPatient.setGender(updatedData.getGender());
@@ -220,6 +356,11 @@ public class PatientService {
 
         Patient saved = patientRepository.save(existingPatient);
         evictStatsCache(saved.getHospitalId());
+
+        if (!acknowledgedConflicts.isEmpty()) {
+            auditDuplicatePhoneAcknowledgement(saved, newPhone, acknowledgedConflicts,
+                    saved.getHospitalId());
+        }
 
         // Create audit log
         try {

@@ -102,6 +102,21 @@ public interface PatientRepository extends JpaRepository<Patient, Long> {
         List<Patient> findByPhoneAndHospitalIdAndIsActiveTrue(String phone, Long hospitalId);
 
         /**
+         * The same tenant-scoped active-phone lookup, with the ordering written down.
+         *
+         * <p>The unordered form above returns rows in whatever order the plan happens to produce.
+         * That was tolerable while the only caller took the first element, and it stopped being
+         * tolerable the moment the result became a list shown to a human: a parent and a child on
+         * one number must appear in the same order every time, or reception is choosing from a
+         * list that reshuffles itself between attempts. Ascending id is registration order, which
+         * is also the order staff expect.
+         */
+        @Query("SELECT p FROM Patient p WHERE p.phone = :phone AND p.hospitalId = :hospitalId "
+                        + "AND p.isActive = true ORDER BY p.id ASC")
+        List<Patient> findActiveByPhoneOrdered(@Param("phone") String phone,
+                        @Param("hospitalId") Long hospitalId);
+
+        /**
          * Find active patients created within a date range (for Today filter)
          */
         Optional<Patient> findByPublicId(String publicId);

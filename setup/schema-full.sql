@@ -559,6 +559,9 @@ CREATE TABLE `patients` (
   `phone` varchar(15) NOT NULL,
   `public_id` varchar(255) NOT NULL,
   `status` enum('REGISTERED','CONSULTING','COMPLETED') NOT NULL,
+  `duplicate_phone_ack_for` varchar(15) DEFAULT NULL,
+  `duplicate_phone_ack_at` datetime(6) DEFAULT NULL,
+  `duplicate_phone_ack_by` varchar(100) DEFAULT NULL,
   PRIMARY KEY (`id`),
   UNIQUE KEY `UK_8isyrjl9ji56k5uv4cgp9p2q6` (`public_id`)
 ) ENGINE=InnoDB AUTO_INCREMENT=3 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;

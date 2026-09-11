@@ -70,6 +70,9 @@ public class AppointmentService {
     @Autowired
     private PatientRegistrar patientRegistrar;
 
+    @Autowired
+    private PatientDuplicateFinder patientDuplicateFinder;
+
 
     /**
      * Create a new appointment
@@ -82,6 +85,18 @@ public class AppointmentService {
      */
     @Transactional
     public Appointment createAppointment(Appointment appointment) {
+        return createAppointment(appointment, false);
+    }
+
+    /**
+     * @param acknowledgeDuplicatePhone reception has been shown the active patients already on
+     *                                  this number and has stated that the person being booked is
+     *                                  a different one. Without it, any match at all stops the
+     *                                  booking and asks — see the comment at the lookup below.
+     */
+    @Transactional
+    public Appointment createAppointment(Appointment appointment,
+            boolean acknowledgeDuplicatePhone) {
         // Get hospital_id from security context (multi-tenant isolation)
         Long hospitalId = securityHelper.getCurrentHospitalId();
 
@@ -110,16 +125,27 @@ public class AppointmentService {
                 throw new IllegalArgumentException("Either patientId or patient details (name, phone) must be provided");
             }
 
-            // Check if patient already exists by phone
-            List<com.hms.entity.Patient> existingPatients = patientRepository
-                    .findByPhoneAndHospitalIdAndIsActiveTrue(patientPhone, hospitalId);
+            // Does this hospital already have an active patient on this number?
+            //
+            // This used to reuse existingPatients.get(0) — an arbitrary row out of however many
+            // matched. A parent and a child legitimately share one mobile, so "the first patient
+            // with this number" is not the same question as "the patient this appointment is
+            // for", and answering the wrong one attaches a child's appointment to the parent's
+            // clinical record. A match is now a question for reception, never an inference here:
+            // even a single match stops and asks, because one match is exactly the case where
+            // guessing looks safest and is not.
+            java.util.List<com.hms.dto.DuplicatePatientMatch> conflicts =
+                    patientDuplicateFinder.findActiveByPhone(hospitalId, patientPhone, null);
 
-            if (!existingPatients.isEmpty()) {
-                // Use existing patient (first one found if duplicates exist)
-                com.hms.entity.Patient existingPatient = existingPatients.get(0);
-                patientId = existingPatient.getId();
-                logger.info("Found existing patient with phone {}, using patient ID {}", LogSanitizer.clean(patientPhone), patientId);
-            } else {
+            if (!conflicts.isEmpty() && !acknowledgeDuplicatePhone) {
+                // Thrown before anything in this transaction has been written, so it rolls back
+                // clean. Catching a constraint violation after a write would instead leave a
+                // rollback-only transaction that can no longer record anything.
+                throw new com.hms.exception.DuplicatePhoneConflictException(
+                        PatientService.DUPLICATE_PHONE_MESSAGE, conflicts);
+            }
+
+            { // scope for the new patient; reached only with no match, or with an explicit ack
                 // Create new patient
                 com.hms.entity.Patient newPatient = new com.hms.entity.Patient();
                 newPatient.setName(patientName);
@@ -131,6 +157,14 @@ public class AppointmentService {
                 newPatient.setAddress("Walk-in"); // Default address for quick appointments
                 newPatient.setHospitalId(hospitalId);
                 newPatient.setIsActive(true);
+                if (!conflicts.isEmpty()) {
+                    // Value-bound: the acknowledgement records that THIS number was confirmed
+                    // shared, so changing the patient's phone later lets the exemption lapse.
+                    newPatient.setDuplicatePhoneAckFor(patientPhone);
+                    newPatient.setDuplicatePhoneAckAt(
+                            java.time.LocalDateTime.now(java.time.ZoneId.systemDefault()));
+                    newPatient.setDuplicatePhoneAckBy(securityHelper.getCurrentUserEmail());
+                }
 
                 // The same insert the registration endpoint uses, so a patient booked through an
                 // appointment gets the same PAT-number as one registered at the desk. This path
@@ -151,6 +185,26 @@ public class AppointmentService {
                             "Auto-created");
                 } catch (Exception e) {
                     logger.warn("Failed to create audit log for patient auto-creation", e);
+                }
+                if (!conflicts.isEmpty()) {
+                    try {
+                        String existing = conflicts.stream()
+                                .map(cf -> cf.customId() != null ? cf.customId()
+                                        : String.valueOf(cf.id()))
+                                .collect(java.util.stream.Collectors.joining(", "));
+                        auditLogService.logAction(
+                                "PATIENT_DUPLICATE_PHONE_ACKNOWLEDGED",
+                                "Booked as a different person sharing phone "
+                                        + PatientDuplicateFinder.maskPhone(patientPhone)
+                                        + " with existing patient(s): " + existing,
+                                securityHelper.getCurrentUserEmail(),
+                                hospitalId,
+                                "PATIENT",
+                                savedPatient.getPublicId(),
+                                "Shared phone acknowledged by staff");
+                    } catch (Exception e) {
+                        logger.warn("Failed to audit duplicate-phone acknowledgement", e);
+                    }
                 }
                 logger.info("Created new patient {} with ID {} for hospital {}", LogSanitizer.clean(patientName), patientId, hospitalId);
             }

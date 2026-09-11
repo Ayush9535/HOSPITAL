@@ -169,6 +169,8 @@ public class DatabaseMigrationRunner {
         ensureVitalsIcuColumns();      // ICU Phase 4
         ensureIcuStayTable();          // ICU Phase 3
         backfillIcuStaysForCurrentOccupants();
+        ensurePatientDuplicatePhoneAckColumns(); // Patient duplicate prevention (Phase A)
+
     }
 
     /**
@@ -2964,4 +2966,25 @@ public class DatabaseMigrationRunner {
             log.warn("createTableIfMissing skipped ({}): {}", table, e.getMessage());
         }
     }
+
+    /**
+     * Patient duplicate prevention, Phase A — the acknowledgement columns only.
+     *
+     * <p>{@code duplicate_phone_ack_for} holds the phone number a member of staff confirmed this
+     * patient legitimately shares with another active patient of the same hospital. It is a value
+     * and not a flag so the exemption is bound to that number: change the patient's phone and the
+     * acknowledgement stops applying, because it was never a per-patient opt-out. The other two
+     * columns say who confirmed it and when.
+     *
+     * <p>Phase A deliberately stops here. The generated column and the unique index that make the
+     * database the concurrency backstop come later, once existing duplicates are reconciled —
+     * adding a unique index over unreconciled data would fail, and this runner's helpers swallow
+     * failures, so it would fail silently.
+     */
+    private void ensurePatientDuplicatePhoneAckColumns() {
+        addColumnIfMissing("patients", "duplicate_phone_ack_for", "VARCHAR(15) DEFAULT NULL");
+        addColumnIfMissing("patients", "duplicate_phone_ack_at", "DATETIME(6) DEFAULT NULL");
+        addColumnIfMissing("patients", "duplicate_phone_ack_by", "VARCHAR(100) DEFAULT NULL");
+    }
+
 }

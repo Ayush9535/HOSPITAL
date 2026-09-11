@@ -61,8 +61,11 @@ public class AppointmentController {
     @PostMapping
     @RequireModule("APPOINTMENTS")
     @PreAuthorize("hasAnyRole('HOSPITAL_ADMIN', 'RECEPTIONIST')")
-    public ResponseEntity<?> createAppointment(@Valid @RequestBody Appointment appointment) {
-        Appointment createdAppointment = appointmentService.createAppointment(appointment);
+    public ResponseEntity<?> createAppointment(@Valid @RequestBody Appointment appointment,
+            @RequestParam(name = "acknowledgeDuplicatePhone", defaultValue = "false")
+            boolean acknowledgeDuplicatePhone) {
+        Appointment createdAppointment = appointmentService.createAppointment(appointment,
+                acknowledgeDuplicatePhone);
         return ResponseEntity.ok(createdAppointment);
     }
 

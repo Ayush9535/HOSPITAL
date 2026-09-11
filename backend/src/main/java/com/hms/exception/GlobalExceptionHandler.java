@@ -222,6 +222,21 @@ public class GlobalExceptionHandler {
     }
 
     /**
+     * A registration collided with an existing active patient on the same phone number.
+     *
+     * <p>Answered as a 409 like any other conflict, but carrying the matched patients so the
+     * caller can offer the only two sensible choices: use one of them, or declare the new
+     * registration a different person who shares the number. Registered above the generic
+     * DataIntegrityViolation handler because it is the specific case and must win.
+     */
+    @ExceptionHandler(DuplicatePhoneConflictException.class)
+    public ResponseEntity<ApiErrorResponse> handleDuplicatePhone(DuplicatePhoneConflictException ex) {
+        return ResponseEntity.status(ErrorCode.CONFLICT.status())
+                .body(ApiErrorResponse.ofConflicts(ErrorCode.CONFLICT, ex.getMessage(),
+                        ex.getConflicts(), CorrelationIdFilter.currentId()));
+    }
+
+    /**
      * A database constraint rejected an otherwise well-formed request. Constraint names and SQL
      * fragments are deployment details, so keep them out of the public response while preserving
      * the retryable conflict semantics callers already use for business preconditions.

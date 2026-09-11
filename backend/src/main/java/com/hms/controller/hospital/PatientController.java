@@ -32,17 +32,29 @@ public class PatientController {
     @Autowired
     private com.hms.service.hospital.PatientTimelineService patientTimelineService;
 
+    /**
+     * The acknowledgement is a query parameter and not a body field on purpose: the body IS the
+     * Patient entity, so a field there would be settable by any caller and would turn the
+     * shared-phone workflow into an opt-out. Both roles that may register a patient may also
+     * acknowledge a shared number — they are the people standing in front of the family.
+     */
     @PostMapping
     @PreAuthorize("hasAnyRole('HOSPITAL_ADMIN', 'RECEPTIONIST')")
-    public ResponseEntity<?> addPatient(@Valid @RequestBody Patient patient) {
-        Patient createdPatient = patientService.addPatient(patient);
+    public ResponseEntity<?> addPatient(@Valid @RequestBody Patient patient,
+            @RequestParam(name = "acknowledgeDuplicatePhone", defaultValue = "false")
+            boolean acknowledgeDuplicatePhone) {
+        Patient createdPatient = patientService.addPatient(patient, acknowledgeDuplicatePhone);
         return ResponseEntity.ok(createdPatient);
     }
 
     @PutMapping("/{id}")
     @PreAuthorize("hasAnyRole('HOSPITAL_ADMIN', 'RECEPTIONIST')")
-    public ResponseEntity<?> updatePatient(@PathVariable Long id, @Valid @RequestBody Patient patient) {
-        Patient updatedPatient = patientService.updatePatient(id, patient);
+    public ResponseEntity<?> updatePatient(@PathVariable Long id,
+            @Valid @RequestBody Patient patient,
+            @RequestParam(name = "acknowledgeDuplicatePhone", defaultValue = "false")
+            boolean acknowledgeDuplicatePhone) {
+        Patient updatedPatient = patientService.updatePatient(id, patient,
+                acknowledgeDuplicatePhone);
         return ResponseEntity.ok(updatedPatient);
     }
 

@@ -6,6 +6,7 @@ import AppointmentModal from '../../components/AppointmentModal';
 import ConfirmationModal from '../../components/ConfirmationModal';
 import DataTable from '../../components/DataTable';
 import DateSelect from '../../components/DateSelect';
+import DuplicatePhoneConflictModal from '../../components/DuplicatePhoneConflictModal';
 import EmptyState from '../../components/EmptyState';
 import FollowUpPanel from '../../components/FollowUpPanel';
 import HistoryDrawer from '../../components/HistoryDrawer';
@@ -42,6 +43,7 @@ import hospitalService from '../../services/hospitalService';
 import otService from '../../services/otService';
 import { extractApiError, safeLoadMessage } from '../../utils/apiError';
 import { formatDateTime, formatTime } from '../../utils/date';
+import { extractPhoneConflicts } from '../../utils/duplicatePhone';
 import { createOptionalModuleFetcher } from '../../utils/optionalModule';
 import { printPdf } from '../../utils/printPdf';
 import { validateForm } from '../../utils/validation';
@@ -125,6 +127,9 @@ const ReceptionistDashboard = () => {
   const [editBillItemsSubmitting, setEditBillItemsSubmitting] = useState(false);
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
   const [isAddPatientModalOpen, setIsAddPatientModalOpen] = useState(false);
+  // Patients this hospital already has on the number typed into the OPD intake form. Set means
+  // the submit is waiting on a person to say whether it is the same patient or a different one.
+  const [opdPhoneConflicts, setOpdPhoneConflicts] = useState(null);
   const [isOpdModalOpen, setIsOpdModalOpen] = useState(false);
   const [opdSubmitting, setOpdSubmitting] = useState(false);
   // setState is asynchronous; the ref closes the same-frame double-click window the state
@@ -1051,6 +1056,164 @@ const ReceptionistDashboard = () => {
 
   // True while the OPD form is collecting a brand new patient inline instead of searching.
   const isNewOpdPatient = canCreatePatient && opdPatientMode === 'new';
+
+  /**
+   * The OPD intake submit, lifted out of the form so the duplicate-phone chooser can re-enter it.
+   *
+   * @param acknowledgeDuplicatePhone resubmit confirming this is a different person who shares a
+   *        mobile number with an existing patient.
+   * @param existingPatientId the OPD is for a patient already registered on that number, picked
+   *        from the conflict list — no patient is created.
+   */
+  const submitOpd = async ({
+    acknowledgeDuplicatePhone = false,
+    existingPatientId = null,
+  } = {}) => {
+    if (opdSubmitting || opdInFlight.current) return;
+    // Every check runs before any request, so a bad vitals value can never leave a
+    // patient created with no OPD behind it.
+    if (isNewOpdPatient && !existingPatientId) {
+      const patientErrors = validateForm(newPatientForm, patientFormRules);
+      setNewPatientErrors(patientErrors);
+      if (Object.keys(patientErrors).length > 0) {
+        toastError('Please correct the highlighted patient details');
+        return;
+      }
+      // Also the branch taken when a patient was picked from the duplicate-phone list: there is
+      // nothing to validate, because nothing is being created.
+    } else if (!existingPatientId && !opdForm.patientId) {
+      toastError('Please select a valid patient from the suggestions');
+      return;
+    }
+    // Validate vitals
+    if (opdForm.bp) {
+      const bpVal = opdForm.bp.trim();
+      const bpMatch = bpVal.match(/^(\d{2,3})\s*\/\s*(\d{2,3})$/);
+      if (!bpMatch) {
+        toastError('Blood pressure must be in format Systolic/Diastolic, e.g., 120/80');
+        return;
+      }
+      const systolic = parseInt(bpMatch[1], 10);
+      const diastolic = parseInt(bpMatch[2], 10);
+      if (systolic <= diastolic) {
+        toastError('Systolic blood pressure must be greater than diastolic blood pressure');
+        return;
+      }
+    }
+    if (opdForm.temperature) {
+      const temp = parseFloat(opdForm.temperature);
+      if (isNaN(temp) || temp < 0) {
+        toastError('Temperature cannot be negative');
+        return;
+      }
+    }
+    if (opdForm.pulse) {
+      const pulse = parseInt(opdForm.pulse, 10);
+      if (isNaN(pulse) || pulse < 0) {
+        toastError('Pulse cannot be negative');
+        return;
+      }
+    }
+    if (opdForm.weight) {
+      const weight = parseFloat(opdForm.weight);
+      if (isNaN(weight) || weight < 0) {
+        toastError('Weight cannot be negative');
+        return;
+      }
+    }
+    if (opdForm.spo2) {
+      const spo2 = parseInt(opdForm.spo2, 10);
+      if (isNaN(spo2) || spo2 < 0) {
+        toastError('SpO2 cannot be negative');
+        return;
+      }
+    }
+
+    // Bill Payment = First: the fee is collected here, so the method is required.
+    const payErr = validateOpdPayment(opdForm.paymentMethod, opdForm.paymentReference);
+    if (payErr) {
+      toastError(payErr);
+      return;
+    }
+
+    // Claimed here, after every validation return above, so a rejected form can
+    // never strand the flag and block all later submits.
+    opdInFlight.current = true;
+    setOpdSubmitting(true);
+
+    // Two sequential calls to the two existing endpoints. The OPD is only
+    // attempted once the patient exists.
+    // A patient chosen from the duplicate-phone list short-circuits creation entirely: the
+    // person at the desk is one of the patients already registered on this number.
+    let patientId = existingPatientId || opdForm.patientId;
+    if (isNewOpdPatient && !existingPatientId) {
+      try {
+        const created = await hospitalService.addPatient(stripPatientPayload(newPatientForm), {
+          acknowledgeDuplicatePhone,
+        });
+        patientId = created?.id;
+        if (!patientId) throw new Error('Patient was saved without an id');
+        // The patient is committed the moment this resolves, so the form stops
+        // describing someone to create and starts describing someone who exists.
+        // Without this, a failed OPD below leaves the modal open still in "new"
+        // mode, and the obvious retry registers the same person a second time —
+        // nothing on the server rejects that, so the duplicate is permanent.
+        setOpdForm((prev) => ({ ...prev, patientId }));
+        setOpdPatientMode('existing');
+        setPatientSearchText(
+          `${created.name}${created.phone ? ` (${created.phone})` : ''}${created.customId ? ` [${created.customId}]` : ''}`
+        );
+      } catch (err) {
+        const conflicts = extractPhoneConflicts(err);
+        if (conflicts) {
+          // Paused, not failed: this number already belongs to someone here and only the person
+          // at the desk can say whether it is the same patient. The form is kept as typed.
+          setOpdPhoneConflicts(conflicts);
+          opdInFlight.current = false;
+          setOpdSubmitting(false);
+          return;
+        }
+        console.error('Failed to create patient', err);
+        toastError(extractApiError(err, 'Failed to create patient'));
+        opdInFlight.current = false;
+        setOpdSubmitting(false);
+        return;
+      }
+    }
+
+    try {
+      const payload = {
+        patientId,
+        doctorId: opdForm.doctorId,
+        bp: opdForm.bp ? opdForm.bp : null,
+        temperature: opdForm.temperature ? parseFloat(opdForm.temperature) : null,
+        pulse: opdForm.pulse ? parseInt(opdForm.pulse) : null,
+        weight: opdForm.weight ? parseFloat(opdForm.weight) : null,
+        height: opdForm.height ? parseFloat(opdForm.height) : null,
+        customVitals: opdForm.customVitals || {},
+        spo2: opdForm.spo2 ? parseInt(opdForm.spo2) : null,
+        problem: opdForm.problem,
+        visitType: opdForm.visitType,
+        ...(isPayFirst()
+          ? {
+              paymentMethod: opdForm.paymentMethod,
+              paymentReference: opdForm.paymentReference || null,
+            }
+          : {}),
+      };
+      const res = await hospitalService.createOpd(payload);
+      setCreatedOpd(res);
+      setIsOpdModalOpen(false);
+      success('OPD Case created successfully — ID: ' + res.caseId);
+      loadData(); // Refresh the data after OPD creation
+    } catch (err) {
+      console.error('Failed to create OPD', err);
+      toastError('Failed to create OPD');
+    } finally {
+      opdInFlight.current = false;
+      setOpdSubmitting(false);
+    }
+  };
 
   const handleNewPatientChange = (field, value) => {
     setNewPatientForm((prev) => ({ ...prev, [field]: value }));
@@ -2239,6 +2402,30 @@ const ReceptionistDashboard = () => {
       )}
 
       {/* Patient Modal - Using Shared Component */}
+      {opdPhoneConflicts && (
+        <DuplicatePhoneConflictModal
+          isOpen
+          conflicts={opdPhoneConflicts}
+          busy={opdSubmitting}
+          onUseExisting={(patient) => {
+            // The person at the desk is this patient. Switch the form onto them so a later
+            // retry cannot register a second copy, then run the OPD against their id.
+            setOpdPhoneConflicts(null);
+            setOpdForm((prev) => ({ ...prev, patientId: patient.id }));
+            setOpdPatientMode('existing');
+            setPatientSearchText(
+              `${patient.name}${patient.customId ? ` [${patient.customId}]` : ''}`
+            );
+            submitOpd({ existingPatientId: patient.id });
+          }}
+          onRegisterDifferent={() => {
+            setOpdPhoneConflicts(null);
+            submitOpd({ acknowledgeDuplicatePhone: true });
+          }}
+          onCancel={() => setOpdPhoneConflicts(null)}
+        />
+      )}
+
       {((activeTab === 'patients' && isAddModalOpen) ||
         (activeTab === 'overview' && isAddPatientModalOpen)) && (
         <PatientModal
@@ -2299,141 +2486,9 @@ const ReceptionistDashboard = () => {
               </div>
             </div>
             <form
-              onSubmit={async (e) => {
+              onSubmit={(e) => {
                 e.preventDefault();
-                if (opdSubmitting || opdInFlight.current) return;
-                // Every check runs before any request, so a bad vitals value can never leave a
-                // patient created with no OPD behind it.
-                if (isNewOpdPatient) {
-                  const patientErrors = validateForm(newPatientForm, patientFormRules);
-                  setNewPatientErrors(patientErrors);
-                  if (Object.keys(patientErrors).length > 0) {
-                    toastError('Please correct the highlighted patient details');
-                    return;
-                  }
-                } else if (!opdForm.patientId) {
-                  toastError('Please select a valid patient from the suggestions');
-                  return;
-                }
-                // Validate vitals
-                if (opdForm.bp) {
-                  const bpVal = opdForm.bp.trim();
-                  const bpMatch = bpVal.match(/^(\d{2,3})\s*\/\s*(\d{2,3})$/);
-                  if (!bpMatch) {
-                    toastError('Blood pressure must be in format Systolic/Diastolic, e.g., 120/80');
-                    return;
-                  }
-                  const systolic = parseInt(bpMatch[1], 10);
-                  const diastolic = parseInt(bpMatch[2], 10);
-                  if (systolic <= diastolic) {
-                    toastError(
-                      'Systolic blood pressure must be greater than diastolic blood pressure'
-                    );
-                    return;
-                  }
-                }
-                if (opdForm.temperature) {
-                  const temp = parseFloat(opdForm.temperature);
-                  if (isNaN(temp) || temp < 0) {
-                    toastError('Temperature cannot be negative');
-                    return;
-                  }
-                }
-                if (opdForm.pulse) {
-                  const pulse = parseInt(opdForm.pulse, 10);
-                  if (isNaN(pulse) || pulse < 0) {
-                    toastError('Pulse cannot be negative');
-                    return;
-                  }
-                }
-                if (opdForm.weight) {
-                  const weight = parseFloat(opdForm.weight);
-                  if (isNaN(weight) || weight < 0) {
-                    toastError('Weight cannot be negative');
-                    return;
-                  }
-                }
-                if (opdForm.spo2) {
-                  const spo2 = parseInt(opdForm.spo2, 10);
-                  if (isNaN(spo2) || spo2 < 0) {
-                    toastError('SpO2 cannot be negative');
-                    return;
-                  }
-                }
-
-                // Bill Payment = First: the fee is collected here, so the method is required.
-                const payErr = validateOpdPayment(opdForm.paymentMethod, opdForm.paymentReference);
-                if (payErr) {
-                  toastError(payErr);
-                  return;
-                }
-
-                // Claimed here, after every validation return above, so a rejected form can
-                // never strand the flag and block all later submits.
-                opdInFlight.current = true;
-                setOpdSubmitting(true);
-
-                // Two sequential calls to the two existing endpoints. The OPD is only
-                // attempted once the patient exists.
-                let patientId = opdForm.patientId;
-                if (isNewOpdPatient) {
-                  try {
-                    const created = await hospitalService.addPatient(
-                      stripPatientPayload(newPatientForm)
-                    );
-                    patientId = created?.id;
-                    if (!patientId) throw new Error('Patient was saved without an id');
-                    // The patient is committed the moment this resolves, so the form stops
-                    // describing someone to create and starts describing someone who exists.
-                    // Without this, a failed OPD below leaves the modal open still in "new"
-                    // mode, and the obvious retry registers the same person a second time —
-                    // nothing on the server rejects that, so the duplicate is permanent.
-                    setOpdForm((prev) => ({ ...prev, patientId }));
-                    setOpdPatientMode('existing');
-                    setPatientSearchText(
-                      `${created.name}${created.phone ? ` (${created.phone})` : ''}${created.customId ? ` [${created.customId}]` : ''}`
-                    );
-                  } catch (err) {
-                    console.error('Failed to create patient', err);
-                    toastError(extractApiError(err, 'Failed to create patient'));
-                    opdInFlight.current = false;
-                    setOpdSubmitting(false);
-                    return;
-                  }
-                }
-
-                try {
-                  const payload = {
-                    patientId,
-                    doctorId: opdForm.doctorId,
-                    bp: opdForm.bp ? opdForm.bp : null,
-                    temperature: opdForm.temperature ? parseFloat(opdForm.temperature) : null,
-                    pulse: opdForm.pulse ? parseInt(opdForm.pulse) : null,
-                    weight: opdForm.weight ? parseFloat(opdForm.weight) : null,
-                    height: opdForm.height ? parseFloat(opdForm.height) : null,
-                    customVitals: opdForm.customVitals || {},
-                    spo2: opdForm.spo2 ? parseInt(opdForm.spo2) : null,
-                    problem: opdForm.problem,
-                    visitType: opdForm.visitType,
-                    ...(isPayFirst()
-                      ? {
-                          paymentMethod: opdForm.paymentMethod,
-                          paymentReference: opdForm.paymentReference || null,
-                        }
-                      : {}),
-                  };
-                  const res = await hospitalService.createOpd(payload);
-                  setCreatedOpd(res);
-                  setIsOpdModalOpen(false);
-                  success('OPD Case created successfully — ID: ' + res.caseId);
-                  loadData(); // Refresh the data after OPD creation
-                } catch (err) {
-                  console.error('Failed to create OPD', err);
-                  toastError('Failed to create OPD');
-                } finally {
-                  opdInFlight.current = false;
-                  setOpdSubmitting(false);
-                }
+                return submitOpd();
               }}
               className="p-6 space-y-4 max-h-[76vh] overflow-auto"
             >

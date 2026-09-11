@@ -48,17 +48,26 @@ const hospitalService = {
 
   /**
    * Add a new patient
+   *
+   * `acknowledgeDuplicatePhone` travels as a query parameter rather than a body field because
+   * the body is the patient record itself: a field there would be settable by anything that can
+   * post a patient, turning the shared-phone confirmation into an opt-out. Pass it only after a
+   * human has seen the conflicting patients and chosen "Register Different Patient".
    */
-  addPatient: async (patientData) => {
-    const response = await apiClient.post('/hospital/patients', patientData);
+  addPatient: async (patientData, { acknowledgeDuplicatePhone = false } = {}) => {
+    const response = await apiClient.post('/hospital/patients', patientData, {
+      params: acknowledgeDuplicatePhone ? { acknowledgeDuplicatePhone: true } : undefined,
+    });
     return response.data;
   },
 
   /**
    * Update existing patient
    */
-  updatePatient: async (id, patientData) => {
-    const response = await apiClient.put(`/hospital/patients/${id}`, patientData);
+  updatePatient: async (id, patientData, { acknowledgeDuplicatePhone = false } = {}) => {
+    const response = await apiClient.put(`/hospital/patients/${id}`, patientData, {
+      params: acknowledgeDuplicatePhone ? { acknowledgeDuplicatePhone: true } : undefined,
+    });
     return response.data;
   },
 
@@ -651,8 +660,10 @@ const hospitalService = {
   /**
    * Create a new appointment
    */
-  createAppointment: async (appointmentData) => {
-    const response = await apiClient.post('/hospital/appointments', appointmentData);
+  createAppointment: async (appointmentData, { acknowledgeDuplicatePhone = false } = {}) => {
+    const response = await apiClient.post('/hospital/appointments', appointmentData, {
+      params: acknowledgeDuplicatePhone ? { acknowledgeDuplicatePhone: true } : undefined,
+    });
     return response.data;
   },
 

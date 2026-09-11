@@ -35,7 +35,7 @@ import static org.mockito.Mockito.when;
 @DataJpaTest(showSql = false)
 @AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE)
 @ActiveProfiles("test")
-@Import({PatientService.class, PatientRegistrar.class})
+@Import({PatientService.class, PatientRegistrar.class, PatientDuplicateFinder.class})
 class PatientRegistrationNumberTest {
 
     private static final long MINE = 1L;

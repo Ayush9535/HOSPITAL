@@ -37,7 +37,8 @@ import static org.mockito.Mockito.when;
 @DataJpaTest(showSql = false)
 @AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE)
 @ActiveProfiles("test")
-@Import({AppointmentService.class, PatientService.class, PatientRegistrar.class})
+@Import({AppointmentService.class, PatientService.class, PatientRegistrar.class,
+        PatientDuplicateFinder.class})
 class AppointmentPatientPersistenceTest {
 
     private static final long MINE = 1L;
@@ -99,8 +100,16 @@ class AppointmentPatientPersistenceTest {
         assertThat(stored.getHospitalId()).isEqualTo(MINE);
     }
 
+    /**
+     * Behaviour changed here, deliberately. This used to assert that booking for a known phone
+     * silently reused the matching patient. It no longer does: a parent and a child share one
+     * mobile, so "the existing patient with this number" is not necessarily the patient being
+     * booked, and attaching the child's appointment to the parent's record is a clinical-safety
+     * failure. Reception is now asked which patient it is — and the property this test was
+     * really protecting, that no second identity is created, still holds.
+     */
     @Test
-    void anExistingPatientIsReusedAndKeepsTheNumberItAlreadyHad() {
+    void bookingForAKnownPhoneAsksInsteadOfReusingAndCreatesNoSecondIdentity() {
         Patient existing = new Patient();
         existing.setHospitalId(MINE);
         existing.setName("Asha Rao");
@@ -114,15 +123,79 @@ class AppointmentPatientPersistenceTest {
 
         Appointment a = walkIn("9990001111");
         a.setAppointmentTime(LocalTime.of(11, 0));
+        org.assertj.core.api.Assertions.assertThatThrownBy(
+                        () -> appointmentService.createAppointment(a))
+                .isInstanceOf(com.hms.exception.DuplicatePhoneConflictException.class);
+
+        em.clear();
+
+        assertThat(patientRepository.count())
+                .as("booking for a known phone creates no second identity")
+                .isEqualTo(countBefore);
+        Patient reloaded = patientRepository.findById(seeded.getId()).orElseThrow();
+        assertThat(reloaded.getCustomId()).isEqualTo("PAT" + seeded.getId());
+    }
+
+    /**
+     * The "Use This Patient" half of the workflow: reception picks one of the matches and the
+     * booking proceeds against that exact patient, creating nobody.
+     */
+    @Test
+    void bookingAgainstAChosenPatientIdCreatesNoPatient() {
+        Patient existing = new Patient();
+        existing.setHospitalId(MINE);
+        existing.setName("Asha Rao");
+        existing.setPhone("9990002222");
+        existing.setGender("FEMALE");
+        existing.setDateOfBirth(LocalDate.of(1985, 1, 1));
+        Patient seeded = patientRepository.saveAndFlush(existing);
+        seeded.setCustomId("PAT" + seeded.getId());
+        em.flush();
+        long countBefore = patientRepository.count();
+
+        Appointment a = walkIn("9990002222");
+        a.setPatientId(seeded.getId());
+        a.setAppointmentTime(LocalTime.of(12, 0));
         appointmentService.createAppointment(a);
 
         em.flush();
         em.clear();
 
-        assertThat(patientRepository.count())
-                .as("reuse means reuse: booking for a known phone creates no second identity")
-                .isEqualTo(countBefore);
-        Patient reloaded = patientRepository.findById(seeded.getId()).orElseThrow();
-        assertThat(reloaded.getCustomId()).isEqualTo("PAT" + seeded.getId());
+        assertThat(patientRepository.count()).isEqualTo(countBefore);
+    }
+
+    /**
+     * The "Register Different Patient" half: an explicit acknowledgement books a genuinely
+     * different person onto the shared number, and the acknowledgement is bound to that number.
+     */
+    @Test
+    void anAcknowledgedBookingRegistersASecondPersonOnTheSharedNumber() {
+        Patient existing = new Patient();
+        existing.setHospitalId(MINE);
+        existing.setName("Rahul Patil");
+        existing.setPhone("9990003333");
+        existing.setGender("MALE");
+        existing.setDateOfBirth(LocalDate.of(1987, 4, 2));
+        Patient seeded = patientRepository.saveAndFlush(existing);
+        seeded.setCustomId("PAT" + seeded.getId());
+        em.flush();
+        long countBefore = patientRepository.count();
+
+        Appointment a = walkIn("9990003333");
+        a.setPatientName("Aarav Patil");
+        a.setAppointmentTime(LocalTime.of(13, 0));
+        appointmentService.createAppointment(a, true);
+
+        em.flush();
+        em.clear();
+
+        assertThat(patientRepository.count()).isEqualTo(countBefore + 1);
+        Patient added = patientRepository.findActiveByPhoneOrdered("9990003333", MINE).stream()
+                .filter(p -> !p.getId().equals(seeded.getId()))
+                .findFirst().orElseThrow();
+        assertThat(added.getName()).isEqualTo("Aarav Patil");
+        assertThat(added.getCustomId()).isEqualTo("PAT" + added.getId());
+        assertThat(added.getDuplicatePhoneAckFor()).isEqualTo("9990003333");
+        assertThat(added.getDuplicatePhoneAckBy()).isEqualTo("reception@hospital.test");
     }
 }

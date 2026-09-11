@@ -37,6 +37,7 @@ class AppointmentServiceNewPatientTest {
     // assigned. These two tests are about the date of birth this service puts on the entity
     // before handing it over, so the insert is stubbed to hand the same instance back.
     @Mock PatientRegistrar patientRegistrar;
+    @Mock com.hms.service.hospital.PatientDuplicateFinder patientDuplicateFinder;
 
     @InjectMocks AppointmentService service;
 
@@ -58,7 +59,9 @@ class AppointmentServiceNewPatientTest {
         // Module validity is normalized at the plan boundary; this service only enforces tenant
         // ownership for the patient and doctor referenced by the booking.
         when(securityHelper.getCurrentHospitalId()).thenReturn(1L);
-        when(patientRepository.findByPhoneAndHospitalIdAndIsActiveTrue(phone, 1L))
+        // Nobody at this hospital is on this number, so the booking creates a patient rather
+        // than stopping to ask which of several people sharing it is being booked.
+        when(patientDuplicateFinder.findActiveByPhone(1L, phone, null))
                 .thenReturn(Collections.emptyList());
         Doctor doctor = new Doctor();
         doctor.setId(1L);
