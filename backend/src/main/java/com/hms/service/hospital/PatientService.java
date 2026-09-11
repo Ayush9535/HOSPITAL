@@ -35,6 +35,9 @@ public class PatientService {
     private PatientRepository patientRepository;
 
     @Autowired
+    private PatientRegistrar patientRegistrar;
+
+    @Autowired
     private org.springframework.cache.CacheManager cacheManager;
 
     @Autowired
@@ -135,6 +138,13 @@ public class PatientService {
      * @param patient Patient entity to create
      * @return Created Patient entity
      */
+    /**
+     * Deliberately NOT {@code @Transactional}. The audit call below is non-fatal by design, but
+     * AuditLogService.logAction is itself transactional: inside a caller's transaction its failure
+     * marks that transaction rollback-only, and the patient is lost at commit even though the
+     * exception is caught here. Keeping the insert's transaction inside PatientRegistrar lets the
+     * patient commit first and leaves the audit in a transaction of its own.
+     */
     public Patient addPatient(Patient patient) {
         // Validate phone number
         if (patient.getPhone() == null || !patient.getPhone().matches("^[0-9]{10}$")) {
@@ -153,11 +163,7 @@ public class PatientService {
         patient.setHospitalId(hospitalId);
 
         logger.info("Hospital {} creating new patient: {}", hospitalId, LogSanitizer.clean(patient.getName()));
-        Patient savedPatient = patientRepository.save(patient);
-
-        // Set sequential customId using the auto-increment id: PAT1, PAT2, PAT3...
-        savedPatient.setCustomId("PAT" + savedPatient.getId());
-        savedPatient = patientRepository.save(savedPatient);
+        Patient savedPatient = patientRegistrar.persistNewPatient(patient);
 
         evictStatsCache(hospitalId);
 

@@ -23,6 +23,8 @@ import static org.mockito.Mockito.*;
 class PatientServiceDateOfBirthTest {
 
     @Mock PatientRepository patientRepository;
+    // The insert and the registration number live in PatientRegistrar now.
+    @Mock com.hms.service.hospital.PatientRegistrar patientRegistrar;
     @Mock CacheManager cacheManager;
     @Mock SecurityContextHelper securityHelper;
     @Mock AuditLogService auditLogService;
@@ -89,12 +91,12 @@ class PatientServiceDateOfBirthTest {
         Patient patient = newPatient(LocalDate.now().minusYears(30));
         Patient saved = newPatient(LocalDate.now().minusYears(30));
         saved.setId(5L);
-        when(patientRepository.save(any(Patient.class))).thenReturn(saved, saved);
+        when(patientRegistrar.persistNewPatient(any(Patient.class))).thenReturn(saved);
 
         Patient result = service.addPatient(patient);
 
         assertThat(result.getDateOfBirth()).isEqualTo(LocalDate.now().minusYears(30));
-        verify(patientRepository, atLeastOnce()).save(any(Patient.class));
+        verify(patientRegistrar, atLeastOnce()).persistNewPatient(any(Patient.class));
     }
 
     @Test

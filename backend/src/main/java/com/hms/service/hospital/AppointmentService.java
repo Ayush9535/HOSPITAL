@@ -67,6 +67,9 @@ public class AppointmentService {
     @Autowired
     private com.hms.security.HospitalWebSocketHandler webSocketHandler;
 
+    @Autowired
+    private PatientRegistrar patientRegistrar;
+
 
     /**
      * Create a new appointment
@@ -129,21 +132,26 @@ public class AppointmentService {
                 newPatient.setHospitalId(hospitalId);
                 newPatient.setIsActive(true);
 
-                // Log patient creation audit
+                // The same insert the registration endpoint uses, so a patient booked through an
+                // appointment gets the same PAT-number as one registered at the desk. This path
+                // used to call patientRepository.save directly and never assign one.
+                com.hms.entity.Patient savedPatient = patientRegistrar.persistNewPatient(newPatient);
+                patientId = savedPatient.getId();
+
+                // Audited after the insert, not before: the entity had no id or publicId yet, so
+                // the old ordering recorded every auto-created patient against a null subject.
                 try {
                     auditLogService.logAction(
                             "PATIENT_CREATED",
-                            "Patient " + newPatient.getName() + " was created during appointment booking.",
+                            "Patient " + savedPatient.getName() + " was created during appointment booking.",
                             securityHelper.getCurrentUserEmail(),
                             hospitalId,
                             "PATIENT",
-                            null, // ID not yet available pre-save? No, save first.
+                            savedPatient.getPublicId(),
                             "Auto-created");
                 } catch (Exception e) {
+                    logger.warn("Failed to create audit log for patient auto-creation", e);
                 }
-
-                com.hms.entity.Patient savedPatient = patientRepository.save(newPatient);
-                patientId = savedPatient.getId();
                 logger.info("Created new patient {} with ID {} for hospital {}", LogSanitizer.clean(patientName), patientId, hospitalId);
             }
 

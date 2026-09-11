@@ -1,4 +1,4 @@
-package com.hms.service;
+package com.hms.service.hospital;
 
 import com.hms.entity.Appointment;
 import com.hms.entity.Doctor;
@@ -7,7 +7,6 @@ import com.hms.repository.AppointmentRepository;
 import com.hms.repository.DoctorRepository;
 import com.hms.repository.PatientRepository;
 import com.hms.security.SecurityContextHelper;
-import com.hms.service.hospital.AppointmentService;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
@@ -34,6 +33,10 @@ class AppointmentServiceNewPatientTest {
     @Mock DoctorRepository doctorRepository;
     @Mock AppointmentRepository appointmentRepository;
     @Mock SecurityContextHelper securityHelper;
+    // The insert itself belongs to PatientRegistrar, which is where the registration number is
+    // assigned. These two tests are about the date of birth this service puts on the entity
+    // before handing it over, so the insert is stubbed to hand the same instance back.
+    @Mock PatientRegistrar patientRegistrar;
 
     @InjectMocks AppointmentService service;
 
@@ -69,30 +72,34 @@ class AppointmentServiceNewPatientTest {
     @Test
     void createAppointment_newPatientWithDob_setsDateOfBirthOnCreatedPatient() {
         mockCommonCollaborators("9876543210");
-        Patient saved = new Patient();
-        saved.setId(9L);
-        when(patientRepository.save(any(Patient.class))).thenReturn(saved);
+        when(patientRegistrar.persistNewPatient(any(Patient.class))).thenAnswer(inv -> {
+            Patient p = inv.getArgument(0);
+            p.setId(9L);
+            return p;
+        });
 
         Appointment appointment = newWalkInAppointment("9876543210", LocalDate.now().minusYears(25));
 
         service.createAppointment(appointment);
 
-        verify(patientRepository).save(patientCaptor.capture());
+        verify(patientRegistrar).persistNewPatient(patientCaptor.capture());
         assertThat(patientCaptor.getValue().getDateOfBirth()).isEqualTo(LocalDate.now().minusYears(25));
     }
 
     @Test
     void createAppointment_newPatientNoDob_defaultsToToday() {
         mockCommonCollaborators("9876543211");
-        Patient saved = new Patient();
-        saved.setId(10L);
-        when(patientRepository.save(any(Patient.class))).thenReturn(saved);
+        when(patientRegistrar.persistNewPatient(any(Patient.class))).thenAnswer(inv -> {
+            Patient p = inv.getArgument(0);
+            p.setId(10L);
+            return p;
+        });
 
         Appointment appointment = newWalkInAppointment("9876543211", null);
 
         service.createAppointment(appointment);
 
-        verify(patientRepository).save(patientCaptor.capture());
+        verify(patientRegistrar).persistNewPatient(patientCaptor.capture());
         assertThat(patientCaptor.getValue().getDateOfBirth()).isEqualTo(LocalDate.now());
     }
 
