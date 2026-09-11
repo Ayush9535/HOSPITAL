@@ -49,12 +49,18 @@ public class AuditLog {
     @Column(name = "performed_by", nullable = false)
     private String performedBy; // Username/Email of the admin
 
+    @Column(name = "performed_by_role")
+    private String performedByRole;
+
     @CreationTimestamp
     @Column(nullable = false, updatable = false)
     private LocalDateTime timestamp;
 
     @Column(name = "hospital_id")
     private Long hospitalId; // Null for Platform/SuperAdmin actions
+
+    @Column(name = "branch_id")
+    private Long branchId; // Pharmacy branch ID (Multi Pharmacy only); null for non-branch contexts
 
     @Column(name = "entity_type")
     private String entityType; // PATIENT, DOCTOR, APPOINTMENT
@@ -105,6 +111,14 @@ public class AuditLog {
         this.performedBy = performedBy;
     }
 
+    public String getPerformedByRole() {
+        return performedByRole;
+    }
+
+    public void setPerformedByRole(String performedByRole) {
+        this.performedByRole = performedByRole;
+    }
+
     public LocalDateTime getTimestamp() {
         return timestamp;
     }
@@ -119,6 +133,14 @@ public class AuditLog {
 
     public void setHospitalId(Long hospitalId) {
         this.hospitalId = hospitalId;
+    }
+
+    public Long getBranchId() {
+        return branchId;
+    }
+
+    public void setBranchId(Long branchId) {
+        this.branchId = branchId;
     }
 
     public String getEntityType() {

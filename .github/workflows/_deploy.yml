@@ -1,0 +1,570 @@
+name: Deploy (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        type: string
+        required: true
+        description: GitHub Environment name (staging | production)
+      repo_path:
+        type: string
+        required: true
+        description: Absolute path to the git repo on the server
+      service_name:
+        type: string
+        required: true
+        description: systemd service name (e.g. hms-staging)
+      git_branch:
+        type: string
+        required: true
+        description: Branch to deploy (e.g. staging | main)
+      ssh_host:
+        type: string
+        required: true
+      ssh_port:
+        type: string
+        default: '22'
+      health_port:
+        type: string
+        default: '8080'
+      app_url:
+        type: string
+        default: ''
+      enable_rollback:
+        type: boolean
+        default: false
+      notify_slack:
+        type: boolean
+        default: false
+    secrets:
+      ssh_key:
+        required: true
+      ssh_user:
+        required: false
+      slack_webhook:
+        required: false
+
+jobs:
+  deploy:
+    name: Deploy to ${{ inputs.environment }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    environment:
+      name: ${{ inputs.environment }}
+      url: ${{ inputs.app_url }}
+
+    concurrency:
+      group: deploy-${{ inputs.environment }}
+      cancel-in-progress: false
+
+    steps:
+      # ── Checkout (deploy scripts live in scripts/deploy/) ─────────────────
+      # Pin to SHA in production: https://github.com/actions/checkout/releases
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # tags/history for version derivation
+
+      # ── Deployment header ────────────────────────────────────────────────
+      - name: Write deployment header
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<EOF
+          ## Deployment — ${{ inputs.environment }}
+
+          | Field | Value |
+          | --- | --- |
+          | Environment | \`${{ inputs.environment }}\` |
+          | CI run | [${{ github.event.workflow_run.run_number }}](${{ github.event.workflow_run.html_url }}) |
+          | Commit SHA | \`${{ github.sha }}\` |
+          | Author | ${{ github.actor }} |
+          | Started | $(date -u '+%Y-%m-%d %H:%M:%S UTC') |
+          EOF
+
+      # ── Fail fast if required configuration is missing (never prints values) ──
+      - name: Validate deployment configuration
+        env:
+          HMS_SSH_HOST: ${{ inputs.ssh_host || vars.HOST || vars.SSH_HOST || vars.STAGING_SSH_HOST || vars.PRODUCTION_SSH_HOST }}
+          HMS_SSH_KEY: ${{ secrets.ssh_key }}
+          HMS_REPO_PATH: ${{ inputs.repo_path || vars.DEPLOY_PATH }}
+          HMS_SERVICE: ${{ inputs.service_name || vars.SERVICE_NAME }}
+          HMS_BRANCH: ${{ inputs.git_branch || vars.BRANCH_NAME }}
+        run: bash scripts/deploy/validate-config.sh HMS_SSH_HOST HMS_SSH_KEY HMS_REPO_PATH HMS_SERVICE HMS_BRANCH
+
+      # ── SSH Connection Diagnostics ───────────────────────────────────────
+      # Retries TCP check 5 times before failing — surfaces Hostinger hPanel
+      # firewall or network blocks early instead of letting ssh-action hang.
+      - name: SSH Connection Diagnostics
+        run: |
+          echo "=================== SSH DIAGNOSTICS ==================="
+          echo "Timestamp: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+          echo "Target Host: $SSH_HOST  Port: $SSH_PORT"
+
+          CONNECTED=false
+          for attempt in 1 2 3 4 5; do
+            echo "TCP probe attempt $attempt/5..."
+            if nc -zv -w 10 "$SSH_HOST" "$SSH_PORT" 2>&1; then
+              CONNECTED=true
+              echo "TCP connection succeeded on attempt $attempt."
+              break
+            fi
+            [ $attempt -lt 5 ] && sleep 5
+          done
+
+          if [ "$CONNECTED" = "false" ]; then
+            echo ""
+            echo "ERROR: Cannot reach $SSH_HOST:$SSH_PORT after 5 attempts."
+            echo "Check: 1) Hostinger hPanel Firewall (allow port 22 from 0.0.0.0/0)"
+            echo "       2) VPS is powered on"
+            echo "       3) UFW: sudo ufw allow 22/tcp"
+            echo "       4) TCP wrappers: /etc/hosts.deny must not block GitHub IPs"
+            echo "======================================================="
+            exit 1
+          fi
+          echo "======================================================="
+        env:
+          SSH_HOST: ${{ inputs.ssh_host || vars.HOST || vars.SSH_HOST || vars.STAGING_SSH_HOST || vars.PRODUCTION_SSH_HOST }}
+          SSH_PORT: ${{ inputs.ssh_port || vars.PORT || vars.SSH_PORT || vars.STAGING_SSH_PORT || vars.PRODUCTION_SSH_PORT || '22' }}
+
+      # ── Capture pre-deploy state (previous version → rollback target) ─────
+      - name: Capture pre-deploy state
+        id: prev
+        continue-on-error: true
+        env:
+          SSH_KEY: ${{ secrets.ssh_key }}
+          SSH_HOST: ${{ inputs.ssh_host || vars.HOST || vars.SSH_HOST || vars.STAGING_SSH_HOST || vars.PRODUCTION_SSH_HOST }}
+          SSH_PORT: ${{ inputs.ssh_port || vars.PORT || vars.SSH_PORT || vars.STAGING_SSH_PORT || vars.PRODUCTION_SSH_PORT || '22' }}
+          SSH_USER: ${{ vars.SSH_USER || vars.SSH_USERNAME || secrets.ssh_user || 'deploy' }}
+          REPO: ${{ inputs.repo_path || vars.DEPLOY_PATH }}
+        run: |
+          echo "$SSH_KEY" > /tmp/deploy_key && chmod 600 /tmp/deploy_key
+          PREV=$(ssh -i /tmp/deploy_key -o StrictHostKeyChecking=no -o ConnectTimeout=15 \
+            -p "$SSH_PORT" "$SSH_USER@$SSH_HOST" \
+            "cd '$REPO' 2>/dev/null && git rev-parse HEAD 2>/dev/null || echo unknown")
+          rm -f /tmp/deploy_key
+          echo "PREV_SHA=${PREV:-unknown}" >> "$GITHUB_ENV"
+          echo "Previous deployed commit: ${PREV:-unknown}"
+
+      # ── Download Frontend Build ──────────────────────────────────────────
+      - name: Download Frontend Build
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist-${{ github.sha }}
+          path: frontend/dist
+
+      # ── Download Backend JAR ─────────────────────────────────────────────
+      - name: Download Backend JAR
+        uses: actions/download-artifact@v4
+        with:
+          name: backend-jar-${{ github.sha }}
+          path: backend/target
+
+      # ── Compress artifacts for deployment ────────────────────────────────
+      - name: Compress artifacts for deployment
+        run: tar -czf deploy.tar.gz frontend/dist backend/target/*.jar
+
+      # ── Artifact integrity: record checksums for the deployment manifest ──
+      - name: Compute artifact checksums
+        run: |
+          JAR=$(find backend/target -maxdepth 1 -name '*.jar' ! -name '*-plain.jar' | head -1)
+          {
+            echo "BACKEND_SHA256=$(sha256sum "$JAR" | awk '{print $1}')"
+            echo "FRONTEND_SHA256=$(tar -cf - frontend/dist | sha256sum | awk '{print $1}')"
+            echo "APP_VERSION=$(git describe --tags --always 2>/dev/null || echo "${GITHUB_SHA::7}")"
+          } >> "$GITHUB_ENV"
+
+      # ── Pull latest code on VPS ──────────────────────────────────────────
+      - name: Pull Code on VPS
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ inputs.ssh_host || vars.HOST || vars.SSH_HOST || vars.STAGING_SSH_HOST || vars.PRODUCTION_SSH_HOST }}
+          username: ${{ vars.SSH_USER || vars.SSH_USERNAME || secrets.ssh_user || 'deploy' }}
+          key: ${{ secrets.ssh_key }}
+          port: ${{ inputs.ssh_port || vars.PORT || vars.SSH_PORT || vars.STAGING_SSH_PORT || vars.PRODUCTION_SSH_PORT || '22' }}
+          timeout: 60s
+          command_timeout: 5m
+          script: |
+            set -euo pipefail
+            TS() { date -u '+%Y-%m-%dT%H:%M:%SZ'; }
+
+            REPO="${{ inputs.repo_path || vars.DEPLOY_PATH }}"
+            BRANCH="${{ inputs.git_branch || vars.BRANCH_NAME }}"
+
+            echo "[$(TS)] Pulling latest code..."
+            cd "$REPO"
+            git fetch origin
+            git reset --hard "origin/$BRANCH"
+            git log -1 --oneline
+
+            # Ensure build directories exist
+            mkdir -p frontend/dist
+            mkdir -p backend/target
+
+            # Backup current build artifacts for rollback
+            if [ "${{ inputs.enable_rollback }}" = "true" ]; then
+              echo "[$(TS)] Backing up artifacts for rollback..."
+              mkdir -p ../rollback_backup
+              cp -f backend/target/*.jar ../rollback_backup/prev_backend.jar || true
+              rm -rf ../rollback_backup/prev_frontend_dist
+              cp -r frontend/dist ../rollback_backup/prev_frontend_dist || true
+              PREV_SHA=$(git rev-parse HEAD)
+              echo "$PREV_SHA" > ../rollback_backup/prev_sha.txt
+            fi
+
+      # ── Copy Deployment Package via SCP ──────────────────────────────────
+      # Raw scp with keepalives + a hard per-attempt timeout and retries. The
+      # previous appleboy/scp-action only bounded the connection (timeout: 60s),
+      # not the transfer, so a stalled upload hung until the 30-min job timeout
+      # ("operation was canceled"). Now a stall aborts in <=5 min and retries.
+      - name: Copy Deployment Package via SCP
+        env:
+          SSH_KEY: ${{ secrets.ssh_key }}
+          SSH_HOST: ${{ inputs.ssh_host || vars.HOST || vars.SSH_HOST || vars.STAGING_SSH_HOST || vars.PRODUCTION_SSH_HOST }}
+          SSH_PORT: ${{ inputs.ssh_port || vars.PORT || vars.SSH_PORT || vars.STAGING_SSH_PORT || vars.PRODUCTION_SSH_PORT || '22' }}
+          SSH_USER: ${{ vars.SSH_USER || vars.SSH_USERNAME || secrets.ssh_user || 'deploy' }}
+          TARGET: ${{ inputs.repo_path || vars.DEPLOY_PATH }}
+        run: |
+          echo "$SSH_KEY" > /tmp/deploy_key
+          chmod 600 /tmp/deploy_key
+          SSH_OPTS=(-o StrictHostKeyChecking=no -o ConnectTimeout=30 -o ServerAliveInterval=15 -o ServerAliveCountMax=4)
+          ls -lh deploy.tar.gz
+          ok=false
+          for attempt in 1 2 3; do
+            echo "SCP attempt $attempt/3 ..."
+            if timeout 300 scp -i /tmp/deploy_key "${SSH_OPTS[@]}" -P "$SSH_PORT" deploy.tar.gz "$SSH_USER@$SSH_HOST:$TARGET/"; then
+              ok=true
+              break
+            fi
+            echo "Attempt $attempt failed (stall/timeout); retrying in 10s..."
+            sleep 10
+          done
+          rm -f /tmp/deploy_key
+          if [ "$ok" != "true" ]; then
+            echo "SCP failed after 3 attempts."
+            exit 1
+          fi
+          echo "Deployment package uploaded."
+
+      # ── Pre-deploy database backup (production — BEFORE any schema change) ─
+      # Schema migrations (Flyway) run at service restart below. Take a verified backup first so a
+      # bad migration is always recoverable. Gating: a failed backup STOPS the production deploy.
+      # (Staging is backed up on schedule by db-backup.yml.) The dump stays on the VPS — never
+      # downloaded. See docs/database/BACKUP_AND_RESTORE.md.
+      - name: Pre-deploy database backup
+        if: inputs.environment == 'Production'
+        env:
+          SSH_KEY: ${{ secrets.ssh_key }}
+          SSH_HOST: ${{ inputs.ssh_host || vars.HOST || vars.SSH_HOST || vars.STAGING_SSH_HOST || vars.PRODUCTION_SSH_HOST }}
+          SSH_PORT: ${{ inputs.ssh_port || vars.PORT || vars.SSH_PORT || vars.STAGING_SSH_PORT || vars.PRODUCTION_SSH_PORT || '22' }}
+          SSH_USER: ${{ vars.SSH_USER || vars.SSH_USERNAME || secrets.ssh_user || 'deploy' }}
+          REPO: ${{ inputs.repo_path || vars.DEPLOY_PATH }}
+        run: |
+          # pipefail is REQUIRED here: `rc=$?` after a pipeline reads tee's status, not ssh's, so
+          # without it a failed backup exits 0 and this "gate" waves the deploy through to run
+          # migrations against an unbacked database. That is the opposite of its purpose.
+          set -o pipefail
+          echo "$SSH_KEY" > /tmp/deploy_key && chmod 600 /tmp/deploy_key
+          echo "Taking pre-deploy backup (dump stays on the VPS)..."
+          # backup.sh loads the app env itself (backend/.env, then .env) via scripts/db/load-env.sh
+          # and fails loudly if it cannot determine the database. Do NOT re-add `. ./.env` here:
+          # the JDBC URL contains unquoted `&`, so sourcing it backgrounds the assignment and
+          # leaves SPRING_DATASOURCE_URL empty — which is how this dumped the wrong schema name.
+          ssh -i /tmp/deploy_key -o StrictHostKeyChecking=no -o ConnectTimeout=20 \
+            -p "$SSH_PORT" "$SSH_USER@$SSH_HOST" \
+            "cd '$REPO' && \
+             ENV_LABEL=production RETENTION_DAYS='${{ vars.DB_BACKUP_RETENTION_DAYS || 30 }}' \
+             bash scripts/db/backup.sh" \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+          rc=$?
+          rm -f /tmp/deploy_key
+          exit $rc
+
+      # ── Restart Service and Health Check ─────────────────────────────────
+      - name: Restart Service and Health Check
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ inputs.ssh_host || vars.HOST || vars.SSH_HOST || vars.STAGING_SSH_HOST || vars.PRODUCTION_SSH_HOST }}
+          username: ${{ vars.SSH_USER || vars.SSH_USERNAME || secrets.ssh_user || 'deploy' }}
+          key: ${{ secrets.ssh_key }}
+          port: ${{ inputs.ssh_port || vars.PORT || vars.SSH_PORT || vars.STAGING_SSH_PORT || vars.PRODUCTION_SSH_PORT || '22' }}
+          timeout: 60s
+          command_timeout: 10m
+          script: |
+            set -euo pipefail
+            TS() { date -u '+%Y-%m-%dT%H:%M:%SZ'; }
+
+            REPO="${{ inputs.repo_path || vars.DEPLOY_PATH }}"
+
+            # Extract deployment package
+            echo "[$(TS)] Extracting deployment package on VPS..."
+            cd "$REPO"
+            rm -rf frontend/dist/*
+            rm -f backend/target/*.jar
+            tar -xzf deploy.tar.gz
+            rm -f deploy.tar.gz
+
+            # Inject FRONTEND_URL and SPRING_PROFILES_ACTIVE into systemd
+            SERVICE="${{ inputs.service_name || vars.SERVICE_NAME }}"
+            APP_URL="${{ inputs.app_url }}"
+            ENV_NAME="${{ inputs.environment }}"
+            # Map environment label to Spring profile: Staging→staging, Production→prod
+            case "${ENV_NAME,,}" in
+              staging)    SPRING_PROFILE="staging" ;;
+              production) SPRING_PROFILE="prod"    ;;
+              *)          SPRING_PROFILE="${ENV_NAME,,}" ;;
+            esac
+            if [ -n "$APP_URL" ]; then
+              CLEAN_URL="${APP_URL%/}"
+              sudo mkdir -p /etc/systemd/system/${SERVICE}.service.d/
+              printf '[Service]\nEnvironment="FRONTEND_URL=%s"\nEnvironment="SPRING_PROFILES_ACTIVE=%s"\n' \
+                "$CLEAN_URL" "$SPRING_PROFILE" \
+                | sudo tee /etc/systemd/system/${SERVICE}.service.d/frontend-url.conf > /dev/null
+              echo "[$(TS)] Set FRONTEND_URL=$CLEAN_URL and SPRING_PROFILES_ACTIVE=$SPRING_PROFILE for $SERVICE"
+              sudo systemctl daemon-reload
+            fi
+
+            # Restart service
+            echo "[$(TS)] Restarting $SERVICE ..."
+            sudo systemctl restart "$SERVICE"
+
+            # Health check
+            MAX=15
+            DELAY=10
+            URL="http://localhost:${{ inputs.health_port || vars.PORT || vars.STAGING_HEALTH_PORT || vars.PRODUCTION_HEALTH_PORT || '8080' }}/api/public/health"
+            echo "[$(TS)] Health check: $URL"
+            HEALTHY=false
+            for i in $(seq 1 $MAX); do
+              STATUS=$(curl -s -o /dev/null -w '%{http_code}' "$URL" || echo 000)
+              echo "[$(TS)] Attempt $i/$MAX — HTTP $STATUS"
+              if [ "$STATUS" = "200" ]; then
+                HEALTHY=true
+                break
+              fi
+              sleep "$DELAY"
+            done
+
+            if $HEALTHY; then
+              echo "[$(TS)] Service is healthy."
+              exit 0
+            fi
+
+            # ── Health check failed ───────────────────────────────────────
+            if [ "${{ inputs.enable_rollback }}" = "true" ]; then
+              PREV_SHA=$(cat ../rollback_backup/prev_sha.txt || echo "")
+              echo ""
+              echo "============================================"
+              echo "  HEALTH CHECK FAILED — INITIATING ROLLBACK"
+              echo "  Rolling back to: $PREV_SHA"
+              echo "============================================"
+              cd "$REPO"
+              git reset --hard "$PREV_SHA"
+              
+              # Restore backups
+              echo "Restoring previous build artifacts..."
+              cp -f ../rollback_backup/prev_backend.jar backend/target/hospital-management-system-1.0.0.jar || true
+              rm -rf frontend/dist
+              cp -r ../rollback_backup/prev_frontend_dist frontend/dist || true
+              
+              echo "Restarting service..."
+              sudo systemctl restart "${{ inputs.service_name || vars.SERVICE_NAME }}"
+              
+              # Post-rollback health check
+              ROLLBACK_HEALTHY=false
+              for i in $(seq 1 $MAX); do
+                STATUS=$(curl -s -o /dev/null -w '%{http_code}' "$URL" || echo 000)
+                echo "[$(TS)] Rollback health $i/$MAX — HTTP $STATUS"
+                if [ "$STATUS" = "200" ]; then
+                  ROLLBACK_HEALTHY=true
+                  break
+                fi
+                sleep "$DELAY"
+              done
+              
+              if $ROLLBACK_HEALTHY; then
+                echo "[$(TS)] Rollback succeeded. Previous version is live."
+              else
+                echo "[$(TS)] Rollback health check also failed. Manual intervention required."
+              fi
+              echo "[$(TS)] Deployment FAILED — exiting with error."
+              exit 1
+            else
+              echo "[$(TS)] Health check failed. Rollback disabled."
+              echo "[$(TS)] Hint: check 'journalctl -u ${{ inputs.service_name || vars.SERVICE_NAME }} -n 100' on the server."
+              exit 1
+            fi
+
+      # ── Extended health verification (readiness, dependencies, resources) ──
+      # The proven step above is the rollback gate (liveness 200). This adds readiness (Actuator
+      # overall status reflects DB/Redis/disk) + host resource checks and records structured
+      # results for the manifest. Report-only for now (continue-on-error) so it augments the
+      # signal without destabilising the proven flow — promote to a hard gate after validating
+      # on staging (see docs/deployment/DEPLOYMENT.md §Health verification).
+      - name: Extended health verification
+        id: verify
+        if: success()
+        continue-on-error: true
+        env:
+          SSH_KEY: ${{ secrets.ssh_key }}
+          SSH_HOST: ${{ inputs.ssh_host || vars.HOST || vars.SSH_HOST || vars.STAGING_SSH_HOST || vars.PRODUCTION_SSH_HOST }}
+          SSH_PORT: ${{ inputs.ssh_port || vars.PORT || vars.SSH_PORT || vars.STAGING_SSH_PORT || vars.PRODUCTION_SSH_PORT || '22' }}
+          SSH_USER: ${{ vars.SSH_USER || vars.SSH_USERNAME || secrets.ssh_user || 'deploy' }}
+          REPO: ${{ inputs.repo_path || vars.DEPLOY_PATH }}
+          HPORT: ${{ inputs.health_port || vars.PORT || vars.STAGING_HEALTH_PORT || vars.PRODUCTION_HEALTH_PORT || '8080' }}
+          APP_URL: ${{ inputs.app_url }}
+        run: |
+          mkdir -p deployment-logs
+          echo "$SSH_KEY" > /tmp/deploy_key && chmod 600 /tmp/deploy_key
+          LIVE="http://localhost:${HPORT}/api/public/health"
+          ACT="http://localhost:${HPORT}/actuator/health"
+          ssh -i /tmp/deploy_key -o StrictHostKeyChecking=no -o ConnectTimeout=15 \
+            -p "$SSH_PORT" "$SSH_USER@$SSH_HOST" \
+            "HEALTH_JSON=/tmp/hms-health.json bash '$REPO'/scripts/deploy/verify-deployment.sh '$LIVE' '$ACT' '${APP_URL}'; echo '---HEALTHJSON---'; cat /tmp/hms-health.json 2>/dev/null" \
+            | tee deployment-logs/verify.txt
+          rm -f /tmp/deploy_key
+          sed -n '/---HEALTHJSON---/,$p' deployment-logs/verify.txt | tail -1 > deployment-logs/health.json || true
+          [ -s deployment-logs/health.json ] || echo '{}' > deployment-logs/health.json
+
+      # ── Deployment manifest (machine-readable audit record) ───────────────
+      - name: Generate deployment manifest
+        if: always()
+        env:
+          ENVIRONMENT: ${{ inputs.environment }}
+          APP_VERSION: ${{ env.APP_VERSION }}
+          GIT_SHA: ${{ github.sha }}
+          GIT_BRANCH: ${{ inputs.git_branch }}
+          BUILD_NUMBER: ${{ github.run_number }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          DEPLOYER: ${{ github.actor }}
+          PREV_SHA: ${{ env.PREV_SHA }}
+          ROLLBACK_TARGET: ${{ env.PREV_SHA }}
+          RESULT: ${{ job.status }}
+          BACKEND_SHA256: ${{ env.BACKEND_SHA256 }}
+          FRONTEND_SHA256: ${{ env.FRONTEND_SHA256 }}
+          APPROVAL_REQUIRED: ${{ inputs.environment == 'Production' }}
+          APPROVAL_ENVIRONMENT: ${{ inputs.environment }}
+          HEALTH_JSON: deployment-logs/health.json
+        run: |
+          mkdir -p deployment-logs
+          bash scripts/deploy/generate-deployment-manifest.sh > deployment-logs/deployment-manifest.json
+          {
+            echo "### Deployment manifest"
+            echo '```json'
+            cat deployment-logs/deployment-manifest.json
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # ── Archive manifest into VPS deployment history (best-effort) ────────
+      - name: Archive manifest to deployment history
+        if: always()
+        continue-on-error: true
+        env:
+          SSH_KEY: ${{ secrets.ssh_key }}
+          SSH_HOST: ${{ inputs.ssh_host || vars.HOST || vars.SSH_HOST || vars.STAGING_SSH_HOST || vars.PRODUCTION_SSH_HOST }}
+          SSH_PORT: ${{ inputs.ssh_port || vars.PORT || vars.SSH_PORT || vars.STAGING_SSH_PORT || vars.PRODUCTION_SSH_PORT || '22' }}
+          SSH_USER: ${{ vars.SSH_USER || vars.SSH_USERNAME || secrets.ssh_user || 'deploy' }}
+          REPO: ${{ inputs.repo_path || vars.DEPLOY_PATH }}
+        run: |
+          [ -f deployment-logs/deployment-manifest.json ] || exit 0
+          echo "$SSH_KEY" > /tmp/deploy_key && chmod 600 /tmp/deploy_key
+          SSH_OPTS=(-o StrictHostKeyChecking=no -o ConnectTimeout=15)
+          HIST="$(dirname "$REPO")/deployments"
+          FNAME="deploy-$(date -u '+%Y%m%dT%H%M%SZ')-${GITHUB_SHA::7}.json"
+          ssh -i /tmp/deploy_key "${SSH_OPTS[@]}" -p "$SSH_PORT" "$SSH_USER@$SSH_HOST" "mkdir -p '$HIST'"
+          scp -i /tmp/deploy_key "${SSH_OPTS[@]}" -P "$SSH_PORT" \
+            deployment-logs/deployment-manifest.json "$SSH_USER@$SSH_HOST:$HIST/$FNAME"
+          rm -f /tmp/deploy_key
+          echo "Archived manifest → $HIST/$FNAME"
+
+      # ── Collect service logs ─────────────────────────────────────────────
+      - name: Collect service logs
+        if: always()
+        env:
+          SSH_KEY: ${{ secrets.ssh_key }}
+          SSH_HOST: ${{ inputs.ssh_host || vars.HOST || vars.SSH_HOST || vars.STAGING_SSH_HOST || vars.PRODUCTION_SSH_HOST }}
+          SSH_PORT: ${{ inputs.ssh_port || vars.PORT || vars.SSH_PORT || vars.STAGING_SSH_PORT || vars.PRODUCTION_SSH_PORT || '22' }}
+          SSH_USER: ${{ vars.SSH_USER || vars.SSH_USERNAME || secrets.ssh_user || 'deploy' }}
+        run: |
+          mkdir -p deployment-logs
+
+          echo "$SSH_KEY" > /tmp/deploy_key
+          chmod 600 /tmp/deploy_key
+
+          ssh -i /tmp/deploy_key \
+            -o StrictHostKeyChecking=no \
+            -o ConnectTimeout=15 \
+            -p "$SSH_PORT" \
+            "$SSH_USER@$SSH_HOST" \
+            "journalctl -u ${{ inputs.service_name || vars.SERVICE_NAME }} --since '30 minutes ago' --no-pager 2>&1" \
+            > deployment-logs/service.log 2>&1 \
+            || echo "[log collection failed]" > deployment-logs/service.log
+
+          ssh -i /tmp/deploy_key \
+            -o StrictHostKeyChecking=no \
+            -o ConnectTimeout=15 \
+            -p "$SSH_PORT" \
+            "$SSH_USER@$SSH_HOST" \
+            "cd ${{ inputs.repo_path || vars.DEPLOY_PATH }} && git log -1 --format='%H %s' 2>&1" \
+            > deployment-logs/active-commit.txt 2>&1 \
+            || echo "[commit collection failed]" > deployment-logs/active-commit.txt
+
+          rm -f /tmp/deploy_key
+
+      # ── Upload deployment logs ───────────────────────────────────────────
+      - name: Upload deployment logs
+        if: always()
+        # Pin to SHA in production: https://github.com/actions/upload-artifact/releases
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.environment }}-deploy-logs-${{ github.run_id }}
+          path: deployment-logs/
+          retention-days: 90
+          if-no-files-found: warn
+
+      # ── Slack notification ───────────────────────────────────────────────
+      - name: Notify Slack
+        if: always() && inputs.notify_slack
+        continue-on-error: true
+        env:
+          STATUS: ${{ job.status }}
+        run: |
+          if [ "$STATUS" = "success" ]; then
+            ICON=":white_check_mark:"
+          elif [ "$STATUS" = "failure" ]; then
+            ICON=":x:"
+          else
+            ICON=":warning:"
+          fi
+          if [ "$STATUS" = "success" ]; then COLOR="good"; else COLOR="danger"; fi
+          WEBHOOK="${{ secrets.slack_webhook }}"
+          if [ -n "$WEBHOOK" ]; then
+            curl -sSf -X POST "$WEBHOOK" \
+              -H "Content-Type: application/json" \
+              -d "{
+                \"text\": \"${ICON} *${{ inputs.environment }}* deployment *${STATUS}*\",
+                \"attachments\": [{
+                  \"color\": \"${COLOR}\",
+                  \"fields\": [
+                    {\"title\": \"Environment\", \"value\": \"${{ inputs.environment }}\", \"short\": true},
+                    {\"title\": \"Status\", \"value\": \"${STATUS}\", \"short\": true},
+                    {\"title\": \"Commit\", \"value\": \"\`${{ github.sha }}\`\", \"short\": true},
+                    {\"title\": \"Run\", \"value\": \"<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View run>\", \"short\": true}
+                  ]
+                }]
+              }"
+          else
+            echo "Slack Webhook not set, skipping notification."
+          fi
+
+      # ── Deployment result ────────────────────────────────────────────────
+      - name: Write deployment result
+        if: always()
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<EOF
+
+          ---
+
+          | Result | Finished |
+          | --- | --- |
+          | ${{ job.status }} | $(date -u '+%Y-%m-%d %H:%M:%S UTC') |
+          EOF

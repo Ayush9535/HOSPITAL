@@ -1,0 +1,238 @@
+name: Build Backend
+
+on:
+  workflow_call:
+    inputs:
+      java-version:
+        type: string
+        default: '17'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      checks: write
+      pull-requests: write
+
+    # IpdConcurrencyIT and IcuBackfillIT need a real InnoDB: their subjects are row-lock and
+    # unique-index behaviour under genuine parallelism, which H2 does not reproduce. They take a
+    # datasource by system property rather than Testcontainers because Testcontainers' bundled
+    # docker-java cannot handshake with Docker Desktop on Windows (see IpdConcurrencyIT's header),
+    # so supplying the database here fixes CI without breaking that developer's machine.
+    # Credentials are ephemeral and local to this runner; the database is a throwaway the tests
+    # create and drop (ddl-auto=create-drop).
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: ci-throwaway-not-a-secret
+          MYSQL_DATABASE: hms_concurrency_it
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -pci-throwaway-not-a-secret"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=10
+    defaults:
+      run:
+        working-directory: backend
+
+    steps:
+      # Pin to SHA in production: https://github.com/actions/checkout/releases
+      - uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: ./.github/actions/setup-java
+        with:
+          java-version: ${{ inputs.java-version }}
+
+      - name: Compile
+        run: mvn compile -q
+
+      # JaCoCo (agent + report + coverage-floor check) is bound to the Maven lifecycle in
+      # pom.xml, so a plain `verify` produces the report at target/site/jacoco/jacoco.xml
+      # and enforces the coverage floor. See docs/quality/CODE_QUALITY.md.
+      - name: Run tests with JaCoCo (coverage floor enforced)
+        env:
+          JWT_SECRET: ci-test-secret-not-used-in-real-environment
+        run: >-
+          mvn -B verify --no-transfer-progress
+          -Dhms.it.mysql.url="jdbc:mysql://127.0.0.1:3306/hms_concurrency_it?createDatabaseIfNotExist=true&useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Asia/Kolkata"
+          -Dhms.it.mysql.username=root
+          -Dhms.it.mysql.password=ci-throwaway-not-a-secret
+
+      - name: Publish JUnit report
+        if: always()
+        # Pin to SHA in production: https://github.com/dorny/test-reporter/releases
+        uses: dorny/test-reporter@v1
+        with:
+          name: JUnit — Backend
+          path: backend/target/surefire-reports/TEST-*.xml
+          reporter: java-junit
+          fail-on-error: 'true'
+
+      # Failsafe results were previously invisible: only surefire-reports was published, so a
+      # green build proved the unit tests ran and said nothing about the integration tests.
+      - name: Publish JUnit report — integration tests
+        if: always()
+        uses: dorny/test-reporter@v1
+        with:
+          name: JUnit — Backend ITs
+          path: backend/target/failsafe-reports/TEST-*.xml
+          reporter: java-junit
+          fail-on-error: 'true'
+
+      # A skip is not a pass. Both gates these ITs use fail open: @EnabledIfSystemProperty
+      # skips silently when the property is missing, and disabledWithoutDocker skips silently
+      # when Docker is. Either would leave the build green with the concurrency and MySQL
+      # contracts unverified, which is the state this checkpoint exists to end.
+      - name: Prove the integration tests actually executed
+        if: always()
+        run: |
+          python3 - <<'EOF'
+          import glob, sys, xml.etree.ElementTree as ET
+
+          required = [
+              "com.hms.integration.IpdConcurrencyIT",
+              "com.hms.integration.IcuBackfillIT",
+              "com.hms.service.hospital.HospitalDashboardServiceIT",
+              "com.hms.service.hospital.PharmacySaleTimestampIT",
+              "com.hms.service.hospital.IstDateBoundaryIT",
+          ]
+
+          seen, problems = {}, []
+          for path in glob.glob("target/failsafe-reports/TEST-*.xml"):
+              s = ET.parse(path).getroot()
+              seen[s.get("name")] = (
+                  int(s.get("tests", 0)), int(s.get("skipped", 0)),
+                  int(s.get("failures", 0)), int(s.get("errors", 0)),
+              )
+
+          for cls in required:
+              if cls not in seen:
+                  problems.append(f"{cls}: NO failsafe report — it never ran")
+                  continue
+              tests, skipped, failures, errors = seen[cls]
+              ran = tests - skipped
+              status = f"tests={tests} skipped={skipped} failures={failures} errors={errors}"
+              if ran <= 0:
+                  problems.append(f"{cls}: SKIPPED, nothing executed ({status})")
+              elif failures or errors:
+                  problems.append(f"{cls}: FAILED ({status})")
+              else:
+                  print(f"OK  {cls}: {ran} executed, {status}")
+
+          if problems:
+              print("\nIntegration-test execution proof FAILED:")
+              for p in problems:
+                  print(f"  - {p}")
+              sys.exit(1)
+          print("\nAll required integration tests executed and passed.")
+          EOF
+
+      - name: Upload Failsafe (integration) results
+        if: always()
+        # Pin to SHA in production: https://github.com/actions/upload-artifact/releases
+        uses: actions/upload-artifact@v4
+        with:
+          name: it-results-${{ github.sha }}
+          path: backend/target/failsafe-reports/
+          if-no-files-found: error
+
+      - name: Write backend coverage summary
+        if: always()
+        run: |
+          python3 - <<'EOF'
+          import os, sys
+
+          xml_path = "target/site/jacoco/jacoco.xml"
+          step_summary = os.environ.get("GITHUB_STEP_SUMMARY", "/dev/null")
+
+          if not os.path.exists(xml_path):
+              with open(step_summary, "a") as f:
+                  f.write("## Backend Coverage\n\nJaCoCo XML not found.\n")
+              sys.exit(0)
+
+          # Strip DOCTYPE lines so ElementTree can parse
+          lines = []
+          with open(xml_path, encoding="utf-8") as f:
+              for line in f:
+                  if "<!DOCTYPE" not in line:
+                      lines.append(line)
+
+          import xml.etree.ElementTree as ET
+          try:
+              root = ET.fromstring("".join(lines))
+          except Exception as e:
+              with open(step_summary, "a") as f:
+                  f.write(f"## Backend Coverage\n\nFailed to parse JaCoCo XML report: {e}\n")
+              sys.exit(0)
+
+          metrics = {}
+          for counter in root.findall("counter"):
+              t = counter.attrib.get("type", "")
+              missed = int(counter.attrib.get("missed", 0))
+              covered = int(counter.attrib.get("covered", 0))
+              total = missed + covered
+              pct = f"{100 * covered / total:.1f}%" if total else "N/A"
+              metrics[t] = pct
+
+          table = (
+              "## Backend Coverage\n\n"
+              "| Metric | Coverage |\n"
+              "| --- | --- |\n"
+              f"| Instructions | {metrics.get('INSTRUCTION', 'N/A')} |\n"
+              f"| Branches     | {metrics.get('BRANCH', 'N/A')} |\n"
+              f"| Lines        | {metrics.get('LINE', 'N/A')} |\n"
+              f"| Methods      | {metrics.get('METHOD', 'N/A')} |\n"
+              f"| Classes      | {metrics.get('CLASS', 'N/A')} |\n"
+          )
+
+          with open(step_summary, "a") as f:
+              f.write(table)
+          EOF
+
+      - name: Upload Surefire results
+        if: always()
+        # Pin to SHA in production: https://github.com/actions/upload-artifact/releases
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-${{ github.sha }}
+          path: backend/target/surefire-reports/
+          retention-days: 14
+          if-no-files-found: warn
+
+      - name: Upload JaCoCo XML
+        if: always()
+        # Pin to SHA in production: https://github.com/actions/upload-artifact/releases
+        uses: actions/upload-artifact@v4
+        with:
+          name: jacoco-xml-${{ github.sha }}
+          path: backend/target/site/jacoco/jacoco.xml
+          retention-days: 7
+          if-no-files-found: warn
+
+      - name: Upload JaCoCo HTML
+        if: always()
+        # Pin to SHA in production: https://github.com/actions/upload-artifact/releases
+        uses: actions/upload-artifact@v4
+        with:
+          name: jacoco-html-${{ github.sha }}
+          path: backend/target/site/jacoco/
+          retention-days: 14
+          if-no-files-found: warn
+
+      - name: Package JAR
+        run: mvn package -DskipTests -q
+
+      - name: Upload JAR
+        # Pin to SHA in production: https://github.com/actions/upload-artifact/releases
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-jar-${{ github.sha }}
+          path: backend/target/*.jar
+          retention-days: 7
+          if-no-files-found: error

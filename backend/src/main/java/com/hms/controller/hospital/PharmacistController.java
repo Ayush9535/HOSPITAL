@@ -12,8 +12,7 @@ import org.springframework.data.domain.Pageable;
 import java.util.Map;
 
 @RestController
-@RequestMapping("/hospital/pharmacists")
-@CrossOrigin(origins = { "http://localhost:3000", "http://localhost:5173" })
+@RequestMapping({"/hospital/pharmacists", "/clinic/pharmacists", "/pharmacy/pharmacists"})
 @PreAuthorize("hasRole('HOSPITAL_ADMIN')")
 public class PharmacistController {
 
@@ -22,20 +21,17 @@ public class PharmacistController {
 
     @PostMapping
     public ResponseEntity<?> createPharmacist(@RequestBody Map<String, String> payload) {
-        try {
-            String name = payload.get("name");
-            String email = payload.get("email");
-            String password = payload.get("password");
+        String name = payload.get("name");
+        String email = payload.get("email");
+        String password = payload.get("password");
 
-            if (name == null || email == null || password == null) {
-                return ResponseEntity.badRequest().body("Name, Email, and Password are required");
-            }
-
-            User created = pharmacistService.createPharmacist(name, email, password);
-            return ResponseEntity.ok(created);
-        } catch (Exception e) {
-            return ResponseEntity.badRequest().body(e.getMessage());
+        if (name == null || email == null || password == null) {
+            return ResponseEntity.badRequest().body("Name, Email, and Password are required");
         }
+
+        // phone was previously dropped here — the admin form sends it, the API ignored it.
+        User created = pharmacistService.createPharmacist(name, email, password, payload.get("phone"));
+        return ResponseEntity.ok(pharmacistService.toView(created));
     }
 
     @GetMapping
@@ -50,11 +46,32 @@ public class PharmacistController {
     @DeleteMapping("/{id}")
     public ResponseEntity<?> deletePharmacist(@PathVariable String id,
             @RequestParam(required = false) String reason) {
-        try {
-            pharmacistService.deletePharmacist(id, reason);
-            return ResponseEntity.ok("Pharmacist deleted successfully");
-        } catch (Exception e) {
-            return ResponseEntity.badRequest().body(e.getMessage());
+        pharmacistService.deletePharmacist(id, reason);
+        return ResponseEntity.ok("Pharmacist deleted successfully");
+    }
+
+    @GetMapping("/{id}")
+    public ResponseEntity<?> getPharmacistById(@PathVariable String id) {
+        return ResponseEntity.ok(pharmacistService.getPharmacistViewByPublicId(id));
+    }
+
+    @PutMapping("/{id}")
+    public ResponseEntity<?> updatePharmacist(@PathVariable String id, @RequestBody Map<String, String> payload) {
+        String name = payload.get("name");
+        if (name == null || name.trim().isEmpty()) {
+            return ResponseEntity.badRequest().body("Name is required");
         }
+        User updated = pharmacistService.updatePharmacist(id, name, payload.get("phone"));
+        return ResponseEntity.ok(pharmacistService.toView(updated));
+    }
+
+    @PostMapping("/{id}/reset-password")
+    public ResponseEntity<?> resetPharmacistPassword(@PathVariable String id, @RequestBody java.util.Map<String, String> body) {
+        String newPassword = body.get("newPassword");
+        if (newPassword == null || newPassword.trim().length() < 6) {
+            return ResponseEntity.badRequest().body("Password must be at least 6 characters");
+        }
+        pharmacistService.resetPharmacistPassword(id, newPassword);
+        return ResponseEntity.ok(java.util.Map.of("message", "Password reset successfully"));
     }
 }

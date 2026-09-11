@@ -1,0 +1,59 @@
+name: OSSF Scorecard
+
+# Weekly OpenSSF Scorecard assessment of the repository's security posture (branch protection,
+# token permissions, pinned dependencies, dangerous workflows, etc.). Results upload to the
+# GitHub Security → Code scanning tab.
+
+on:
+  schedule:
+    - cron: '0 6 * * 1' # Mondays 06:00 UTC (weekly)
+  workflow_dispatch:
+
+concurrency:
+  group: scorecard-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions: read-all
+
+jobs:
+  analysis:
+    name: Scorecard analysis
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      security-events: write # upload SARIF to code scanning
+      id-token: write # publish_results (only used when enabled on a public repo)
+    steps:
+      # Pin to SHA in production: https://github.com/actions/checkout/releases
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # Pin to SHA in production: https://github.com/ossf/scorecard-action/releases
+      - name: Run Scorecard
+        uses: ossf/scorecard-action@v2.4.0
+        with:
+          results_file: results.sarif
+          results_format: sarif
+          # Publishing requires a PUBLIC repo (adds the scorecard badge to the OSSF registry).
+          # Leave false for a private repo; set to true once the repo is public.
+          publish_results: false
+
+      - name: Upload SARIF artifact
+        if: always()
+        # Pin to SHA in production: https://github.com/actions/upload-artifact/releases
+        uses: actions/upload-artifact@v4
+        with:
+          name: scorecard-results
+          path: results.sarif
+          retention-days: 14
+          if-no-files-found: warn
+
+      - name: Upload SARIF to code scanning
+        if: always()
+        continue-on-error: true
+        # Pin to SHA in production: https://github.com/github/codeql-action/releases
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: results.sarif
+          category: scorecard

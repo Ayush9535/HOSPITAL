@@ -1,226 +1,182 @@
 import React, { useState, useEffect } from 'react';
-import hospitalService from '../services/hospitalService';
 import { useToast } from '../context/ToastContext';
+import hospitalService from '../services/hospitalService';
+import { extractApiError } from '../utils/apiError';
+import { extractPhoneConflicts } from '../utils/duplicatePhone';
 import { validateForm } from '../utils/validation';
 import Button from './Button';
-import CharCountInput from './CharCountInput';
+import DuplicatePhoneConflictModal from './DuplicatePhoneConflictModal';
+import PatientFormFields, { patientFormRules, stripPatientPayload } from './PatientFormFields';
 
 const PatientModal = ({ isOpen, onClose, onSuccess, initialData }) => {
-    const [formData, setFormData] = useState({});
-    const [errors, setErrors] = useState({});
-    const [isSubmitting, setIsSubmitting] = useState(false);
-    const { success, error: toastError } = useToast();
-    const isEdit = !!initialData;
+  const [formData, setFormData] = useState({});
+  const [errors, setErrors] = useState({});
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  // The patients this mobile number already belongs to. Non-empty means the save is paused on a
+  // question only the user can answer, not that it failed.
+  const [phoneConflicts, setPhoneConflicts] = useState(null);
+  const { success, error: toastError } = useToast();
+  const isEdit = !!initialData;
 
-    useEffect(() => {
-        if (isOpen) {
-            if (initialData) {
-                setFormData(initialData);
-            } else {
-                setFormData({});
-            }
-            setErrors({});
-            setIsSubmitting(false);
-        }
-    }, [isOpen, initialData]);
+  useEffect(() => {
+    if (isOpen) {
+      if (initialData) {
+        setFormData({ insurance: 'NO', ...initialData });
+      } else {
+        setFormData({ insurance: 'NO' });
+      }
+      setErrors({});
+      setIsSubmitting(false);
+      setPhoneConflicts(null);
+    }
+  }, [isOpen, initialData]);
 
-    const handleChange = (field, value) => {
-        setFormData(prev => ({ ...prev, [field]: value }));
-        if (errors[field]) {
-            setErrors(prev => ({ ...prev, [field]: null }));
-        }
-    };
+  const handleChange = (field, value) => {
+    setFormData((prev) => ({ ...prev, [field]: value }));
+    if (errors[field]) {
+      setErrors((prev) => ({ ...prev, [field]: null }));
+    }
+  };
 
-    const handleSubmit = async (e) => {
-        e.preventDefault();
-        setErrors({});
-        setIsSubmitting(true);
+  /**
+   * @param acknowledgeDuplicatePhone only ever true on the second attempt, after the user has
+   *        seen the existing patients on this number and pressed "Register Different Patient".
+   *        Never inferred: the whole point is that only a person at the desk can tell a parent
+   *        from a child on one mobile.
+   */
+  const save = async ({ acknowledgeDuplicatePhone = false } = {}) => {
+    setErrors({});
+    setIsSubmitting(true);
 
-        const rules = {
-            name: ['required', 'name'],
-            age: ['required', 'age'],
-            gender: ['required'],
-            phone: ['required', 'phone'],
-            email: ['email'] // optional but valid if present
-        };
+    const validationErrors = validateForm(formData, patientFormRules);
+    if (Object.keys(validationErrors).length > 0) {
+      setErrors(validationErrors);
+      setIsSubmitting(false);
+      return;
+    }
 
-        const validationErrors = validateForm(formData, rules);
-        if (Object.keys(validationErrors).length > 0) {
-            setErrors(validationErrors);
-            setIsSubmitting(false);
-            return;
-        }
+    try {
+      // Strip insurance field so it is not sent to backend/database
+      const savePayload = stripPatientPayload(formData);
+      const options = { acknowledgeDuplicatePhone };
 
-        try {
-            if (isEdit) {
-                await hospitalService.updatePatient(formData.id, formData);
-                success('Patient updated successfully');
-                console.log('[PatientModal] Patient updated');
-            } else {
-                const result = await hospitalService.addPatient(formData);
-                success('Patient added successfully');
-                console.log('[PatientModal] Patient added, calling onSuccess');
-            }
-            onSuccess();
-            onClose();
-        } catch (err) {
-            console.error("Failed to save patient", err);
-            const msg = err.response?.data?.message || 'Operation failed';
-            toastError(msg);
-        } finally {
-            setIsSubmitting(false);
-        }
-    };
+      let saved;
+      if (isEdit) {
+        saved = await hospitalService.updatePatient(formData.id, savePayload, options);
+        success('Patient updated successfully');
+        console.log('[PatientModal] Patient updated');
+      } else {
+        saved = await hospitalService.addPatient(savePayload, options);
+        success('Patient added successfully');
+        console.log('[PatientModal] Patient added, calling onSuccess');
+      }
+      // The saved patient is handed to the caller so a flow that needs it (the OPD
+      // modal's "New Patient" option) can select it straight away. Callers that do
+      // not take an argument are unaffected.
+      setPhoneConflicts(null);
+      onSuccess(saved);
+      onClose();
+    } catch (err) {
+      const conflicts = extractPhoneConflicts(err);
+      if (conflicts) {
+        // Not a failure — a question. The form stays exactly as it is behind the chooser so
+        // whichever way the user answers, nothing has to be retyped.
+        setPhoneConflicts(conflicts);
+        return;
+      }
+      console.error('Failed to save patient', err);
+      toastError(extractApiError(err, 'Operation failed'));
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
 
-    if (!isOpen) return null;
+  const handleSubmit = (e) => {
+    e.preventDefault();
+    return save();
+  };
 
+  /**
+   * "Use This Patient" — the person at the desk is one of the existing patients, so nothing new
+   * is created. The chosen patient is handed to the caller exactly as a save would have been,
+   * which is what lets an OPD or appointment flow continue against that record.
+   */
+  const handleUseExisting = (patient) => {
+    setPhoneConflicts(null);
+    onSuccess(patient);
+    onClose();
+  };
+
+  if (!isOpen) return null;
+
+  if (phoneConflicts) {
     return (
-        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4">
-            <div className="bg-white rounded-2xl shadow-organic w-full max-w-3xl animate-scale-in overflow-hidden max-h-[90vh]">
-                {/* Header */}
-                <div className="bg-white px-8 py-6 border-b border-gray-200">
-                    <div className="flex justify-between items-center">
-                        <div>
-                            <h3 className="text-2xl font-bold text-neutral-800">
-                                {isEdit ? 'Edit Patient' : 'Add New Patient'}
-                            </h3>
-                            <p className="text-sm text-neutral-600 mt-1">
-                                {isEdit ? 'Update patient information' : 'Enter patient details to create a new record'}
-                            </p>
-                        </div>
-                        <button 
-                            onClick={onClose} 
-                            className="w-10 h-10 rounded-xl bg-white/80 hover:bg-white flex items-center justify-center text-neutral-400 hover:text-neutral-600 transition-all duration-200 hover:scale-105"
-                        >
-                            <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                            </svg>
-                        </button>
-                    </div>
-                </div>
-
-                {/* Form */}
-                <form onSubmit={handleSubmit} className="p-6 space-y-4 max-h-[76vh] overflow-auto">
-                    {/* Row: Name + Phone */}
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                        <CharCountInput
-                            label="Full Name"
-                            required
-                            value={formData.name || ''}
-                            onChange={(e) => handleChange('name', e.target.value)}
-                            maxLength={50}
-                            placeholder="Enter patient's full name"
-                            error={errors.name}
-                        />
-
-                        <CharCountInput
-                            label="Phone Number"
-                            required
-                            type="tel"
-                            value={formData.phone || ''}
-                            onChange={(e) => handleChange('phone', e.target.value)}
-                            maxLength={15}
-                            placeholder="Enter phone number"
-                            error={errors.phone}
-                        />
-                    </div>
-
-                    {/* Row: Age + Gender */}
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                        <div>
-                            <label className="block text-sm font-semibold text-neutral-700 mb-2">
-                                Age <span className="text-red-600">*</span>
-                            </label>
-                            <input
-                                type="number"
-                                min="0"
-                                max="120"
-                                value={formData.age || ''}
-                                onChange={(e) => handleChange('age', e.target.value)}
-                                className={`input-field ${errors.age ? 'border-error-300 focus:ring-error-500' : ''}`}
-                                placeholder="Age"
-                            />
-                            {errors.age && <p className="text-red-600 text-sm mt-1 flex items-center gap-1">
-                                {errors.age}
-                            </p>}
-                        </div>
-                        <div>
-                            <label className="block text-sm font-semibold text-neutral-700 mb-2">
-                                Gender <span className="text-red-600">*</span>
-                            </label>
-                            <select
-                                value={formData.gender || ''}
-                                onChange={(e) => handleChange('gender', e.target.value)}
-                                className={`input-field ${errors.gender ? 'border-error-300 focus:ring-error-500' : ''}`}
-                            >
-                                <option value="">Select gender</option>
-                                <option value="MALE">Male</option>
-                                <option value="FEMALE">Female</option>
-                                <option value="OTHER">Other</option>
-                            </select>
-                            {errors.gender && <p className="text-red-600 text-sm mt-1 flex items-center gap-1">
-                                {errors.gender}
-                            </p>}
-                        </div>
-                    </div>
-
-                    {/* Row: Email + (Address will be full width) */}
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                        <CharCountInput
-                            label="Email Address"
-                            type="email"
-                            value={formData.email || ''}
-                            onChange={(e) => handleChange('email', e.target.value)}
-                            maxLength={50}
-                            placeholder="Enter email address"
-                            error={errors.email}
-                        />
-                        <CharCountInput
-                            label="Address"
-                            textarea
-                            rows={3}
-                            value={formData.address || ''}
-                            onChange={(e) => handleChange('address', e.target.value)}
-                            maxLength={500}
-                            placeholder="Enter complete address"
-                        />
-                    </div>
-
-                    {/* Medical History */}
-                    <CharCountInput
-                        label="Medical History / Allergies"
-                        textarea
-                        rows={2}
-                        value={formData.medicalHistory || ''}
-                        onChange={(e) => handleChange('medicalHistory', e.target.value)}
-                        maxLength={500}
-                        placeholder="Any medical conditions, allergies, or important notes..."
-                    />
-
-                    {/* Action Buttons */}
-                    <div className="flex gap-4 pt-4">
-                        <Button
-                            type="button"
-                            variant="secondary"
-                            onClick={onClose}
-                            className="flex-1"
-                            disabled={isSubmitting}
-                        >
-                            Cancel
-                        </Button>
-                        <Button
-                            type="submit"
-                            variant="primary"
-                            className="flex-1"
-                            loading={isSubmitting}
-                        >
-                            {isEdit ? 'Update Patient' : 'Save Patient'}
-                        </Button>
-                    </div>
-                </form>
-            </div>
-        </div>
+      <DuplicatePhoneConflictModal
+        isOpen
+        conflicts={phoneConflicts}
+        busy={isSubmitting}
+        onUseExisting={handleUseExisting}
+        onRegisterDifferent={() => save({ acknowledgeDuplicatePhone: true })}
+        onCancel={() => setPhoneConflicts(null)}
+      />
     );
+  }
+
+  return (
+    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+      <div className="bg-white rounded-2xl shadow-organic w-full max-w-3xl animate-scale-in overflow-hidden max-h-[90vh]">
+        {/* Header */}
+        <div className="bg-white px-8 py-6 border-b border-gray-200">
+          <div className="flex justify-between items-center">
+            <div>
+              <h3 className="text-2xl font-bold text-neutral-800">
+                {isEdit ? 'Edit Patient' : 'Add New Patient'}
+              </h3>
+              <p className="text-sm text-neutral-600 mt-1">
+                {isEdit
+                  ? 'Update patient information'
+                  : 'Enter patient details to create a new record'}
+              </p>
+            </div>
+            <button
+              onClick={onClose}
+              className="w-10 h-10 rounded-xl bg-white/80 hover:bg-white flex items-center justify-center text-neutral-400 hover:text-neutral-600 transition-all duration-200 hover:scale-105"
+            >
+              <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                  d="M6 18L18 6M6 6l12 12"
+                />
+              </svg>
+            </button>
+          </div>
+        </div>
+
+        {/* Form */}
+        <form onSubmit={handleSubmit} className="p-6 space-y-4 max-h-[76vh] overflow-auto">
+          <PatientFormFields values={formData} errors={errors} onChange={handleChange} />
+
+          {/* Action Buttons */}
+          <div className="flex gap-4 pt-4">
+            <Button
+              type="button"
+              variant="secondary"
+              onClick={onClose}
+              className="flex-1"
+              disabled={isSubmitting}
+            >
+              Cancel
+            </Button>
+            <Button type="submit" variant="primary" className="flex-1" loading={isSubmitting}>
+              {isEdit ? 'Update Patient' : 'Save Patient'}
+            </Button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
 };
 
 export default PatientModal;

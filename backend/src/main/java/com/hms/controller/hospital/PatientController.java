@@ -1,5 +1,7 @@
 package com.hms.controller.hospital;
 
+import com.hms.exception.ResourceNotFoundException;
+
 import com.hms.entity.Patient;
 import com.hms.service.hospital.PatientService;
 import jakarta.validation.Valid;
@@ -11,115 +13,95 @@ import org.springframework.web.bind.annotation.*;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 
-/**
- * PatientController - REST controller for patient management
- * 
- * This controller provides endpoints for:
- * - Adding new patients (Hospital Admin only)
- * - Listing patients (Hospital Admin and Doctor)
- * - Getting patient details (Hospital Admin and Doctor)
- * 
- * All operations are automatically filtered by hospital_id.
- * 
- * @author HMS Team
- * @version Phase-1
- */
 @RestController
-@RequestMapping("/hospital/patients")
-@CrossOrigin(origins = { "http://localhost:3000", "http://localhost:5173" })
+@RequestMapping({"/hospital/patients", "/clinic/patients", "/pharmacy/patients"})
 public class PatientController {
 
     @Autowired
     private PatientService patientService;
 
+    @Autowired
+    private com.hms.security.SecurityContextHelper securityHelper;
+
+    @Autowired
+    private com.hms.repository.HospitalRepository hospitalRepository;
+
+    @Autowired
+    private com.hms.service.PdfService pdfService;
+
+    @Autowired
+    private com.hms.service.hospital.PatientTimelineService patientTimelineService;
+
     /**
-     * Add a new patient
-     * Only Hospital Admin can add patients
-     * 
-     * @param patient Patient entity to create
-     * @return Created Patient entity
+     * The acknowledgement is a query parameter and not a body field on purpose: the body IS the
+     * Patient entity, so a field there would be settable by any caller and would turn the
+     * shared-phone workflow into an opt-out. Both roles that may register a patient may also
+     * acknowledge a shared number — they are the people standing in front of the family.
      */
     @PostMapping
     @PreAuthorize("hasAnyRole('HOSPITAL_ADMIN', 'RECEPTIONIST')")
-    public ResponseEntity<?> addPatient(@Valid @RequestBody Patient patient) {
-        Patient createdPatient = patientService.addPatient(patient);
+    public ResponseEntity<?> addPatient(@Valid @RequestBody Patient patient,
+            @RequestParam(name = "acknowledgeDuplicatePhone", defaultValue = "false")
+            boolean acknowledgeDuplicatePhone) {
+        Patient createdPatient = patientService.addPatient(patient, acknowledgeDuplicatePhone);
         return ResponseEntity.ok(createdPatient);
     }
 
-    /**
-     * Update an existing patient
-     * Only Hospital Admin and Receptionist can update patients
-     */
     @PutMapping("/{id}")
     @PreAuthorize("hasAnyRole('HOSPITAL_ADMIN', 'RECEPTIONIST')")
-    public ResponseEntity<?> updatePatient(@PathVariable Long id, @Valid @RequestBody Patient patient) {
-        try {
-            Patient updatedPatient = patientService.updatePatient(id, patient);
-            return ResponseEntity.ok(updatedPatient);
-        } catch (RuntimeException e) {
-            return ResponseEntity.badRequest().body(e.getMessage());
-        }
+    public ResponseEntity<?> updatePatient(@PathVariable Long id,
+            @Valid @RequestBody Patient patient,
+            @RequestParam(name = "acknowledgeDuplicatePhone", defaultValue = "false")
+            boolean acknowledgeDuplicatePhone) {
+        Patient updatedPatient = patientService.updatePatient(id, patient,
+                acknowledgeDuplicatePhone);
+        return ResponseEntity.ok(updatedPatient);
     }
 
-    /**
-     * Get all patients for the current hospital
-     * Accessible by Hospital Admin, Doctor, and Receptionist
-     */
     @GetMapping
     @PreAuthorize("hasAnyRole('HOSPITAL_ADMIN', 'DOCTOR', 'RECEPTIONIST')")
     public ResponseEntity<?> getAllPatients(
             @RequestParam(required = false) String search,
             @RequestParam(required = false) String view,
+            @RequestParam(required = false) @org.springframework.format.annotation.DateTimeFormat(iso = org.springframework.format.annotation.DateTimeFormat.ISO.DATE) java.time.LocalDate date,
             @RequestParam(defaultValue = "0") int page,
             @RequestParam(defaultValue = "10") int size) {
         if (search != null && !search.trim().isEmpty()) {
             return ResponseEntity.ok(patientService.searchPatients(search));
         }
         Pageable pageable = PageRequest.of(page, size);
-        return ResponseEntity.ok(patientService.getAllPatients(null, view, pageable));
+        return ResponseEntity.ok(patientService.getAllPatients(null, view, date, pageable));
     }
 
-    /**
-     * Get patient by ID
-     * Accessible by Hospital Admin, Doctor, and Receptionist
-     */
     @GetMapping("/{id}")
     @PreAuthorize("hasAnyRole('HOSPITAL_ADMIN', 'DOCTOR', 'RECEPTIONIST')")
     public ResponseEntity<?> getPatientById(@PathVariable String id) {
-        try {
-            Patient patient = patientService.getPatientByPublicId(id);
-            return ResponseEntity.ok(patient);
-        } catch (Exception e) {
-            return ResponseEntity.badRequest().body(e.getMessage());
-        }
+        Patient patient = patientService.getPatientByPublicId(id);
+        return ResponseEntity.ok(patient);
     }
 
     /**
-     * Delete (Soft Delete) a patient
-     * Only Hospital Admin can delete patients
+     * CLIN-P1: the patient's clinical timeline -- OPD/IPD/Nursing/OT/Recovery events in one
+     * chronological read model, aggregated from the entities that already own each fact.
+     * Clinical detail (diagnoses, medications, nursing notes), so scoped to the clinical roles
+     * rather than the wider set PatientController otherwise uses.
      */
+    @GetMapping("/{id}/timeline")
+    @PreAuthorize("hasAnyRole('HOSPITAL_ADMIN', 'DOCTOR')")
+    public ResponseEntity<?> getPatientTimeline(@PathVariable String id) {
+        Patient patient = patientService.getPatientByPublicId(id);
+        return ResponseEntity.ok(patientTimelineService.forPatient(patient.getId()));
+    }
+
     @DeleteMapping("/{id}")
     @PreAuthorize("hasRole('HOSPITAL_ADMIN')")
     public ResponseEntity<?> deletePatient(@PathVariable String id, @RequestParam(required = false) String reason) {
-        try {
-            patientService.deletePatient(id, reason);
-            return ResponseEntity.ok("Patient deleted successfully");
-        } catch (Exception e) {
-            return ResponseEntity.badRequest().body(e.getMessage());
-        }
+        patientService.deletePatient(id, reason);
+        return ResponseEntity.ok("Patient deleted successfully");
     }
 
-    /**
-     * Update patient status
-     * Doctors and Receptionists can update patient status during consultation
-     * workflow
-     * 
-     * @param publicId Patient public ID
-     * @param status   New status (REGISTERED, CONSULTING, COMPLETED)
-     * @return Updated patient
-     */
     @PutMapping("/{publicId}/status")
-    @PreAuthorize("hasAnyRole('DOCTOR', 'RECEPTIONIST')")
+    @PreAuthorize("hasAnyRole('DOCTOR', 'RECEPTIONIST', 'HOSPITAL_ADMIN')")
     public ResponseEntity<?> updatePatientStatus(
             @PathVariable String publicId,
             @RequestParam String status) {
@@ -129,58 +111,89 @@ public class PatientController {
             return ResponseEntity.ok(updatedPatient);
         } catch (IllegalArgumentException e) {
             return ResponseEntity.badRequest().body("Invalid status: " + status);
-        } catch (Exception e) {
-            return ResponseEntity.badRequest().body(e.getMessage());
         }
     }
 
-    /**
-     * Start consultation for a patient
-     * Changes patient status to CONSULTING
-     * 
-     * @param publicId Patient public ID
-     * @return Updated patient
-     */
     @PostMapping("/{publicId}/start-consultation")
-    @PreAuthorize("hasRole('DOCTOR')")
+    @PreAuthorize("hasAnyRole('DOCTOR', 'HOSPITAL_ADMIN')")
     public ResponseEntity<?> startConsultation(@PathVariable String publicId) {
-        try {
-            Patient updatedPatient = patientService.startConsultation(publicId);
-            return ResponseEntity.ok(updatedPatient);
-        } catch (Exception e) {
-            return ResponseEntity.badRequest().body(e.getMessage());
-        }
+        Patient updatedPatient = patientService.startConsultation(publicId);
+        return ResponseEntity.ok(updatedPatient);
     }
 
-    /**
-     * Get complete patient consultation details
-     * Includes demographics, medical history, and current visit info
-     * Used by doctors during consultation
-     * 
-     * @param publicId Patient public ID
-     * @return Patient consultation details
-     */
     @GetMapping("/{publicId}/consultation-details")
-    @PreAuthorize("hasAnyRole('DOCTOR', 'RECEPTIONIST')")
+    @PreAuthorize("hasAnyRole('DOCTOR', 'RECEPTIONIST', 'HOSPITAL_ADMIN')")
     public ResponseEntity<?> getPatientConsultationDetails(@PathVariable String publicId) {
-        try {
-            java.util.Map<String, Object> details = patientService.getPatientConsultationDetails(publicId);
-            return ResponseEntity.ok(details);
-        } catch (Exception e) {
-            return ResponseEntity.badRequest().body(e.getMessage());
-        }
+        java.util.Map<String, Object> details = patientService.getPatientConsultationDetails(publicId);
+        return ResponseEntity.ok(details);
     }
 
-    /**
-     * Get latest prescription for a patient
-     */
     @GetMapping("/{publicId}/latest-prescription")
-    @PreAuthorize("hasAnyRole('DOCTOR', 'RECEPTIONIST')")
+    @PreAuthorize("hasAnyRole('DOCTOR', 'RECEPTIONIST', 'HOSPITAL_ADMIN')")
     public ResponseEntity<?> getLatestPrescription(@PathVariable String publicId) {
-        try {
-            return ResponseEntity.ok(patientService.getLatestPrescription(publicId));
-        } catch (Exception e) {
-            return ResponseEntity.badRequest().body(e.getMessage());
+        return ResponseEntity.ok(patientService.getLatestPrescription(publicId));
+    }
+
+    @GetMapping("/opd/{opdId}/medicines/pdf")
+    @PreAuthorize("hasAnyRole('DOCTOR', 'RECEPTIONIST', 'HOSPITAL_ADMIN')")
+    public ResponseEntity<?> getOpdMedicinesPdf(@PathVariable Long opdId) {
+        java.io.ByteArrayInputStream pdf = patientService.getOpdMedicinesPdf(opdId);
+        org.springframework.http.HttpHeaders headers = new org.springframework.http.HttpHeaders();
+        headers.add("Content-Disposition", "inline; filename=opd_medicines_" + opdId + ".pdf");
+        return ResponseEntity.ok()
+                .headers(headers)
+                .contentType(org.springframework.http.MediaType.APPLICATION_PDF)
+                .body(new org.springframework.core.io.InputStreamResource(pdf));
+    }
+
+    @GetMapping("/ipd/{ipdId}/medicines/pdf")
+    @PreAuthorize("hasAnyRole('DOCTOR', 'RECEPTIONIST', 'HOSPITAL_ADMIN')")
+    public ResponseEntity<?> getIpdMedicinesPdf(@PathVariable Long ipdId) {
+        java.io.ByteArrayInputStream pdf = patientService.getIpdMedicinesPdf(ipdId);
+        org.springframework.http.HttpHeaders headers = new org.springframework.http.HttpHeaders();
+        headers.add("Content-Disposition", "inline; filename=ipd_medicines_" + ipdId + ".pdf");
+        return ResponseEntity.ok()
+                .headers(headers)
+                .contentType(org.springframework.http.MediaType.APPLICATION_PDF)
+                .body(new org.springframework.core.io.InputStreamResource(pdf));
+    }
+
+    @GetMapping("/ipd/{ipdId}/prescription/pdf")
+    @PreAuthorize("hasAnyRole('DOCTOR', 'RECEPTIONIST', 'HOSPITAL_ADMIN')")
+    public ResponseEntity<?> getIpdPrescriptionPdf(@PathVariable Long ipdId) {
+        java.io.ByteArrayInputStream pdf = patientService.getIpdPrescriptionPdf(ipdId);
+        org.springframework.http.HttpHeaders headers = new org.springframework.http.HttpHeaders();
+        headers.add("Content-Disposition", "inline; filename=ipd_prescription_" + ipdId + ".pdf");
+        return ResponseEntity.ok()
+                .headers(headers)
+                .contentType(org.springframework.http.MediaType.APPLICATION_PDF)
+                .body(new org.springframework.core.io.InputStreamResource(pdf));
+    }
+
+    @GetMapping("/report/pdf")
+    @PreAuthorize("hasAnyRole('HOSPITAL_ADMIN', 'DOCTOR', 'RECEPTIONIST')")
+    public ResponseEntity<?> downloadPatientsReportPdf(
+            @RequestParam(required = false) @org.springframework.format.annotation.DateTimeFormat(iso = org.springframework.format.annotation.DateTimeFormat.ISO.DATE) java.time.LocalDate date) {
+        Long hospitalId = securityHelper.getCurrentHospitalId();
+        if (hospitalId == null) {
+            throw new com.hms.exception.UnauthorizedException("Hospital context not found");
         }
+
+        // Fetch patients without pagination (up to 1000)
+        org.springframework.data.domain.Pageable pageable = org.springframework.data.domain.PageRequest.of(0, 1000);
+        java.util.List<Patient> patients = patientService.getAllPatients(null, null, date, pageable).getContent();
+
+        com.hms.entity.Hospital hospital = hospitalRepository.findById(hospitalId)
+                .orElseThrow(() -> new ResourceNotFoundException("Hospital not found"));
+
+        java.io.ByteArrayInputStream pdfStream = pdfService.generatePatientsReportPdf(hospital, date, patients);
+        org.springframework.core.io.InputStreamResource resource = new org.springframework.core.io.InputStreamResource(pdfStream);
+
+        String filename = "Patients_Report_" + (date != null ? date.toString() : "AllTime") + ".pdf";
+        return ResponseEntity.ok()
+                .header(org.springframework.http.HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=" + filename)
+                .contentType(org.springframework.http.MediaType.APPLICATION_PDF)
+                .body(resource);
     }
 }
+

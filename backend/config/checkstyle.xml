@@ -1,0 +1,67 @@
+<?xml version="1.0"?>
+<!DOCTYPE module PUBLIC
+    "-//Checkstyle//DTD Checkstyle Configuration 1.3//EN"
+    "https://checkstyle.org/dtds/configuration_1_3.dtd">
+
+<!--
+  Checkstyle for the Hospital Management System — a deliberately COMPACT, high-signal
+  ruleset (not Google/Sun full checks, which are very noisy on an existing codebase).
+  Focus: correctness/readability smells that matter, low false-positive rate.
+  Runs REPORT-ONLY in CI for now (see docs/quality/CODE_QUALITY.md).
+-->
+<module name="Checker">
+  <property name="charset" value="UTF-8"/>
+  <property name="severity" value="warning"/>
+  <property name="fileExtensions" value="java"/>
+
+  <!-- No tabs (project uses spaces; see .editorconfig) -->
+  <module name="FileTabCharacter">
+    <property name="eachLine" value="false"/>
+  </module>
+
+  <module name="TreeWalker">
+    <!-- Imports: unused / redundant / star imports are real smells -->
+    <module name="UnusedImports">
+      <property name="processJavadoc" value="true"/>
+    </module>
+    <module name="RedundantImport"/>
+    <module name="AvoidStarImport"/>
+
+    <!-- Correctness / reliability -->
+    <module name="EmptyBlock">
+      <property name="option" value="text"/>
+      <property name="tokens" value="LITERAL_CATCH,LITERAL_FINALLY,LITERAL_TRY,LITERAL_IF,LITERAL_ELSE,LITERAL_FOR,LITERAL_WHILE"/>
+    </module>
+    <module name="EqualsHashCode"/>
+    <module name="CovariantEquals"/>
+    <module name="StringLiteralEquality"/>
+    <module name="MissingSwitchDefault"/>
+    <module name="FallThrough"/>
+    <module name="SimplifyBooleanExpression"/>
+    <module name="SimplifyBooleanReturn"/>
+    <module name="IllegalCatch">
+      <property name="illegalClassNames" value="java.lang.Error,java.lang.Throwable"/>
+    </module>
+    <module name="OneStatementPerLine"/>
+    <module name="DefaultComesLast"/>
+
+    <!-- Naming (industry-standard conventions) -->
+    <module name="TypeName"/>
+    <module name="MethodName"/>
+    <module name="ConstantName"/>
+    <module name="PackageName"/>
+
+    <!-- Size limits (maintainability) — generous, only flags genuine outliers -->
+    <module name="MethodLength">
+      <property name="max" value="150"/>
+    </module>
+    <module name="ParameterNumber">
+      <property name="max" value="10"/>
+    </module>
+
+    <!-- Complexity — flag only genuinely hard-to-maintain methods -->
+    <module name="CyclomaticComplexity">
+      <property name="max" value="20"/>
+    </module>
+  </module>
+</module>

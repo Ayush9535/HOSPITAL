@@ -1,0 +1,31 @@
+# Configures GitHub's "Generate release notes" button so release notes are
+# auto-categorised from merged PR labels. No workflow needed — GitHub reads this
+# file natively when you draft a release. Keep labels in sync with .github/labels.yml.
+changelog:
+  exclude:
+    labels:
+      - "skip changelog"
+      - "type: chore"
+    authors:
+      - dependabot
+  categories:
+    - title: ⚠️ Breaking Changes
+      labels: ["breaking change"]
+    - title: 🔒 Security
+      labels: ["type: security"]
+    - title: ✨ Features
+      labels: ["type: feature"]
+    - title: 🐛 Bug Fixes
+      labels: ["type: bug"]
+    - title: ⚡ Performance
+      labels: ["type: performance"]
+    - title: ♻️ Refactoring
+      labels: ["type: refactor"]
+    - title: 📝 Documentation
+      labels: ["type: docs"]
+    - title: 🏗️ CI / Build / DevOps
+      labels: ["type: ci", "type: build", "area: devops"]
+    - title: 📦 Dependencies
+      labels: ["dependencies"]
+    - title: 🔧 Other Changes
+      labels: ["*"]

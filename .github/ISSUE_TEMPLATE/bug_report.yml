@@ -1,0 +1,84 @@
+name: "🐛 Bug Report"
+description: Report a defect in the Hospital Management System
+title: "bug: <short summary>"
+labels: ["type: bug", "status: triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing a bug. **Do not include real patient data (PHI), passwords,
+        JWTs, or other secrets** in this report. If this is a security vulnerability,
+        stop and follow our [Security Policy](../security/policy) instead of opening a public issue.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: A clear description of the bug and what you expected instead.
+      placeholder: When I ..., I expected ..., but instead ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      value: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Affected area
+      options:
+        - Backend / API
+        - Frontend / UI
+        - Authentication / Authorization
+        - Multi-tenant isolation
+        - OPD
+        - IPD
+        - Pharmacy
+        - Nursing
+        - OT
+        - Billing
+        - Deployment / CI
+        - Other / unsure
+    validations:
+      required: true
+
+  - type: dropdown
+    id: environment
+    attributes:
+      label: Environment
+      options: [Production, Staging, Local development]
+    validations:
+      required: true
+
+  - type: dropdown
+    id: severity
+    attributes:
+      label: Severity
+      options:
+        - Critical — data loss, breach, or full outage
+        - High — major feature broken, no workaround
+        - Medium — feature broken, workaround exists
+        - Low — minor / cosmetic
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / screenshots
+      description: Relevant logs or screenshots. Redact any PHI or secrets first.
+      render: shell
+
+  - type: input
+    id: version
+    attributes:
+      label: Version / commit
+      description: Release tag (e.g. v1.2.0) or commit SHA, if known.

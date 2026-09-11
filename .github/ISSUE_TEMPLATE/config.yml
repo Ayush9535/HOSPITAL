@@ -1,0 +1,11 @@
+# Force contributors to use a template; route security and support elsewhere.
+blank_issues_enabled: false
+contact_links:
+  - name: 🔒 Report a security vulnerability
+    url: https://github.com/axonxmedtech/HOSPITAL/security/advisories/new
+    about: >
+      Do NOT open a public issue for security problems. Report privately via a
+      GitHub Security Advisory (or the contact in SECURITY.md).
+  - name: 💬 Questions & support
+    url: https://github.com/axonxmedtech/HOSPITAL/blob/main/SUPPORT.md
+    about: How to get help, and where to ask usage questions.

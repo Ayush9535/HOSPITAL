@@ -1,0 +1,83 @@
+name: Java Quality
+
+# Supplementary Java static analysis — Checkstyle, PMD, SpotBugs (+ Find Security Bugs),
+# and Spotless formatting. REPORT-ONLY: every step is continue-on-error, so this job never
+# blocks a build. SonarCloud remains the enforced quality gate; this exists for
+# defense-in-depth and to give the same signal developers get locally.
+
+on:
+  workflow_call:
+    inputs:
+      java-version:
+        type: string
+        default: '17'
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    name: Java static analysis (report-only)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      # Pin to SHA in production: https://github.com/actions/checkout/releases
+      - uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: ./.github/actions/setup-java
+        with:
+          java-version: ${{ inputs.java-version }}
+
+      - name: Compile (SpotBugs analyzes bytecode)
+        run: mvn -B -q -DskipTests compile
+
+      - name: Checkstyle
+        continue-on-error: true
+        run: mvn -B -q checkstyle:checkstyle
+
+      - name: PMD
+        continue-on-error: true
+        run: mvn -B -q pmd:pmd
+
+      - name: SpotBugs + Find Security Bugs
+        continue-on-error: true
+        run: mvn -B -q spotbugs:spotbugs
+
+      - name: Spotless (formatting) check
+        continue-on-error: true
+        run: mvn -B -q spotless:check
+
+      - name: Quality summary
+        if: always()
+        run: |
+          cs=$(grep -c '<error ' target/checkstyle-result.xml 2>/dev/null); : "${cs:=0}"
+          pmd=$(grep -c '<violation' target/pmd.xml 2>/dev/null); : "${pmd:=0}"
+          sb=$(grep -c '<BugInstance' target/spotbugsXml.xml 2>/dev/null); : "${sb:=0}"
+          {
+            echo "## Java Static Analysis (report-only)"
+            echo ""
+            echo "| Tool | Findings |"
+            echo "| --- | --- |"
+            echo "| Checkstyle | ${cs} |"
+            echo "| PMD | ${pmd} |"
+            echo "| SpotBugs + FindSecBugs | ${sb} |"
+            echo ""
+            echo "_Report-only — does not block. SonarCloud is the enforced gate. Full reports in the \`java-quality-reports\` artifact._"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload static-analysis reports
+        if: always()
+        # Pin to SHA in production: https://github.com/actions/upload-artifact/releases
+        uses: actions/upload-artifact@v4
+        with:
+          name: java-quality-reports-${{ github.sha }}
+          path: |
+            backend/target/checkstyle-result.xml
+            backend/target/pmd.xml
+            backend/target/spotbugsXml.xml
+          retention-days: 30
+          if-no-files-found: warn

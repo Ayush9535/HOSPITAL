@@ -1,0 +1,81 @@
+name: Code Quality
+
+# Non-blocking code-health checks for the React/Vite frontend: unused code (Knip), spelling
+# (CSpell), and bundle size (Size Limit). All continue-on-error — informational signals, not gates.
+
+on:
+  push:
+    branches:
+      - staging
+      - main
+  pull_request:
+    branches:
+      - staging
+      - main
+  schedule:
+    - cron: '0 6 * * 6' # weekly, Saturday 06:00 UTC
+  workflow_dispatch:
+
+concurrency:
+  group: code-quality-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ── Unused code / dependencies / exports ──────────────────────────────────
+  knip:
+    name: Unused code (Knip)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    continue-on-error: true
+    steps:
+      # Pin to SHA in production: https://github.com/actions/checkout/releases
+      - uses: actions/checkout@v4
+      - name: Setup Node.js
+        uses: ./.github/actions/setup-node
+        with:
+          node-version: ${{ vars.NODE_VERSION || '22' }}
+          working-directory: frontend
+      - name: Run Knip
+        working-directory: frontend
+        run: npx --yes knip || true
+
+  # ── Spellcheck ────────────────────────────────────────────────────────────
+  cspell:
+    name: Spellcheck (CSpell)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    continue-on-error: true
+    steps:
+      # Pin to SHA in production: https://github.com/actions/checkout/releases
+      - uses: actions/checkout@v4
+      # Pin to SHA in production: https://github.com/actions/setup-node/releases
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ vars.NODE_VERSION || '22' }}
+      - name: Run CSpell
+        run: npx --yes cspell --no-progress --show-suggestions "frontend/src/**/*.{js,jsx}" "docs/**/*.md" "*.md" || true
+
+  # ── Bundle size ───────────────────────────────────────────────────────────
+  size-limit:
+    name: Bundle size (Size Limit)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    continue-on-error: true
+    steps:
+      # Pin to SHA in production: https://github.com/actions/checkout/releases
+      - uses: actions/checkout@v4
+      - name: Setup Node.js
+        uses: ./.github/actions/setup-node
+        with:
+          node-version: ${{ vars.NODE_VERSION || '22' }}
+          working-directory: frontend
+      - name: Build frontend
+        working-directory: frontend
+        env:
+          VITE_API_BASE_URL: ${{ vars.STAGE_API_BASE_URL }}
+        run: npx vite build
+      - name: Run Size Limit
+        run: npx --yes --package size-limit --package @size-limit/file size-limit || true

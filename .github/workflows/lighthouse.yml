@@ -1,0 +1,46 @@
+name: Lighthouse CI
+
+# Lighthouse audits (performance, accessibility, best-practices, SEO) of the built React/Vite
+# frontend on PRs to main. Assertions are set to "warn" in .lighthouserc.json so this reports
+# without blocking merges; tighten to "error" once you have baselines.
+
+on:
+  pull_request:
+    branches:
+      - main
+
+concurrency:
+  group: lighthouse-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  lighthouse:
+    name: Lighthouse audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      # Pin to SHA in production: https://github.com/actions/checkout/releases
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: ./.github/actions/setup-node
+        with:
+          node-version: ${{ vars.NODE_VERSION || '22' }}
+          working-directory: frontend
+
+      - name: Build frontend
+        working-directory: frontend
+        env:
+          VITE_API_BASE_URL: ${{ vars.STAGE_API_BASE_URL }}
+        run: npx vite build
+
+      - name: Run Lighthouse CI
+        # Pin to SHA in production: https://github.com/treosh/lighthouse-ci-action/releases
+        uses: treosh/lighthouse-ci-action@v12
+        with:
+          configPath: ./.lighthouserc.json
+          uploadArtifacts: true
+          temporaryPublicStorage: true

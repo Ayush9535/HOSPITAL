@@ -1,0 +1,38 @@
+# CODEOWNERS — automatic review requests for the Hospital Management System
+#
+# When a PR touches a path below, GitHub auto-requests review from the listed
+# owners. Combined with a branch-protection rule that requires CODEOWNERS review,
+# this guarantees the right people see changes to sensitive areas.
+#
+# Order matters: the LAST matching pattern wins.
+#
+# TODO(governance): replace the placeholder teams/handles below with your real
+# GitHub org teams (create them under github.com/orgs/axonxmedtech/teams) or
+# individual @handles. Until these exist, GitHub silently skips the request.
+
+# ── Default: everything is owned by the core maintainers ──────────────────────
+*                               @axonxmedtech/maintainers
+
+# ── Backend (Spring Boot) ─────────────────────────────────────────────────────
+/backend/                       @axonxmedtech/backend-team
+
+# ── Frontend (React) ──────────────────────────────────────────────────────────
+/frontend/                      @axonxmedtech/frontend-team
+
+# ── Security-sensitive: auth, tenant isolation, JWT ───────────────────────────
+# These paths gate multi-tenant patient-data isolation. Require a security review.
+/backend/src/main/java/com/hms/security/     @axonxmedtech/security-team
+/backend/src/main/java/com/hms/config/       @axonxmedtech/security-team
+
+# ── Database schema & migrations ──────────────────────────────────────────────
+# Schema changes on healthcare data are high-risk — require a DBA/lead review.
+/backend/src/main/resources/db/              @axonxmedtech/backend-leads
+/setup/                                       @axonxmedtech/backend-leads
+
+# ── CI/CD, deployment, and repository governance ──────────────────────────────
+/.github/                       @axonxmedtech/platform-team
+/backend/Dockerfile             @axonxmedtech/platform-team
+
+# ── Documentation ─────────────────────────────────────────────────────────────
+/docs/                          @axonxmedtech/maintainers
+*.md                            @axonxmedtech/maintainers

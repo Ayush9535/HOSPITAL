@@ -1,0 +1,17 @@
+name: Setup Java
+description: Install Java (Temurin) with Maven cache
+
+inputs:
+  java-version:
+    description: Java version to install
+    default: '17'
+
+runs:
+  using: composite
+  steps:
+    # Pin to SHA in production: https://github.com/actions/setup-java/releases
+    - uses: actions/setup-java@v4
+      with:
+        java-version: ${{ inputs.java-version }}
+        distribution: temurin
+        cache: maven
